@@ -42,6 +42,12 @@ uv run python scripts/show_fragments.py \
 crops when `set_epoch()` is called. By default, 30% of crops are centered near a
 non-plain syntax byte to reduce class imbalance.
 
+By default, another 25% of samples are deliberately unrealistic mixtures of
+two to four independently annotated fragments. Every byte carries both a syntax
+target and a local language-region target. Mixed samples have an `unknown` host
+hint, allowing a buffer to switch languages without being a valid container
+document. Tune this with `--mixture-fraction` and `--max-regions`.
+
 ## Train the first BiGRU
 
 ```sh
@@ -54,6 +60,11 @@ uv run python scripts/train_model.py \
 Checkpoints include model/training configuration, optimizer state, epoch, and
 validation metrics. Inference takes only a checkpoint, raw source bytes, and an
 optional language ID; it does not invoke Tree-sitter.
+
+The model has separate syntax and per-byte language-region heads over its shared
+encoder. Region loss defaults to 20% of the total loss, and host-language hints
+are dropped for half of training samples. Configure these with
+`--region-loss-weight` and `--host-hint-dropout`.
 
 ### Watch training with Weights & Biases
 

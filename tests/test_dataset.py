@@ -18,6 +18,14 @@ def test_storage_round_trip(tmp_path: Path) -> None:
     assert list(read_records(path)) == [expected]
 
 
+def test_storage_round_trip_with_region_labels(tmp_path: Path) -> None:
+    path = tmp_path / "regions.jsonl"
+    expected = StoredFile("repo", "python", "x.py", b"x=1", bytes([2, 11, 10]), bytes([2, 2, 2]))
+    with path.open("w", encoding="utf-8") as stream:
+        write_record(stream, expected)
+    assert list(read_records(path)) == [expected]
+
+
 def test_filter_caps_accepted_files_not_input_rows() -> None:
     rows = [
         {"content": "", "repository_name": "r", "path": "empty.py"},

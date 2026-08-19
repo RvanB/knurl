@@ -14,11 +14,11 @@ from torch.utils.data import Dataset
 from neural_highlight.dataset.annotate import Annotation, colored, iter_spans
 from neural_highlight.dataset.storage import StoredFile, read_records
 from neural_highlight.labels import Label, label_name
+from neural_highlight.languages import LANGUAGE_IDS, LANGUAGE_NAMES
 
 
 PAD_BYTE_ID = 256
 IGNORE_LABEL_ID = -100
-LANGUAGE_IDS = {"unknown": 0, "python": 1}
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,7 @@ class Fragment:
     labels: Tensor
     attention_mask: Tensor
     language_id: Tensor
+    region_labels: Tensor
     source_length: Tensor
     file_index: Tensor
     start_byte: Tensor
@@ -47,11 +48,17 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         samples_per_epoch: int | None = None,
         targeted_fraction: float = 0.3,
         seed: int = 0,
+        mixture_fraction: float = 0.25,
+        max_regions: int = 4,
     ) -> None:
         if fragment_length <= 0:
             raise ValueError("fragment_length must be positive")
         if not 0.0 <= targeted_fraction <= 1.0:
             raise ValueError("targeted_fraction must be between zero and one")
+        if not 0.0 <= mixture_fraction <= 1.0:
+            raise ValueError("mixture_fraction must be between zero and one")
+        if max_regions < 2:
+            raise ValueError("max_regions must be at least two")
         self.records = tuple(read_records(Path(path)))
         if not self.records:
             raise ValueError(f"no records found in {path}")
@@ -59,6 +66,8 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         self.samples_per_epoch = samples_per_epoch or len(self.records)
         self.targeted_fraction = targeted_fraction
         self.seed = seed
+        self.mixture_fraction = mixture_fraction
+        self.max_regions = max_regions
         self.epoch = 0
         self._interesting = tuple(
             tuple(index for index, label in enumerate(record.labels) if label != Label.PLAIN)
@@ -88,23 +97,81 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         if index < 0 or index >= len(self):
             raise IndexError(index)
         rng = self._rng(index)
+        if rng.random() < self.mixture_fraction:
+            return self._mixed_sample(rng)
+        return self._single_sample(rng)
+
+    def _region_bytes(self, record: StoredFile, start: int, length: int) -> bytes:
+        if record.region_labels is not None:
+            return record.region_labels[start : start + length]
+        language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
+        return bytes([language_id]) * length
+
+    def _pack(
+        self,
+        source: bytes,
+        labels: bytes,
+        region_labels: bytes,
+        host_language_id: int,
+        record_index: int,
+        start: int,
+    ) -> dict[str, Tensor]:
+        source_length = len(source)
+        padding = self.fragment_length - source_length
+        return {
+            "input_ids": torch.tensor(list(source) + [PAD_BYTE_ID] * padding, dtype=torch.long),
+            "labels": torch.tensor(list(labels) + [IGNORE_LABEL_ID] * padding, dtype=torch.long),
+            "region_labels": torch.tensor(
+                list(region_labels) + [IGNORE_LABEL_ID] * padding, dtype=torch.long
+            ),
+            "attention_mask": torch.tensor([True] * source_length + [False] * padding),
+            "language_id": torch.tensor(host_language_id, dtype=torch.long),
+            "source_length": torch.tensor(source_length, dtype=torch.long),
+            "file_index": torch.tensor(record_index, dtype=torch.long),
+            "start_byte": torch.tensor(start, dtype=torch.long),
+        }
+
+    def _single_sample(self, rng: random.Random) -> dict[str, Tensor]:
         record_index = rng.randrange(len(self.records))
         record = self.records[record_index]
         start = self._crop_start(record_index, rng)
         source = record.source[start : start + self.fragment_length]
         labels = record.labels[start : start + self.fragment_length]
-        source_length = len(source)
-        padding = self.fragment_length - source_length
-        language_id = LANGUAGE_IDS.get(record.language, LANGUAGE_IDS["unknown"])
-        return {
-            "input_ids": torch.tensor(list(source) + [PAD_BYTE_ID] * padding, dtype=torch.long),
-            "labels": torch.tensor(list(labels) + [IGNORE_LABEL_ID] * padding, dtype=torch.long),
-            "attention_mask": torch.tensor([True] * source_length + [False] * padding),
-            "language_id": torch.tensor(language_id, dtype=torch.long),
-            "source_length": torch.tensor(source_length, dtype=torch.long),
-            "file_index": torch.tensor(record_index, dtype=torch.long),
-            "start_byte": torch.tensor(start, dtype=torch.long),
-        }
+        language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
+        return self._pack(
+            source, labels, self._region_bytes(record, start, len(source)),
+            language_id, record_index, start,
+        )
+
+    def _mixed_sample(self, rng: random.Random) -> dict[str, Tensor]:
+        region_count = rng.randint(2, min(self.max_regions, self.fragment_length))
+        boundaries = sorted(rng.sample(range(1, self.fragment_length), region_count - 1))
+        lengths = [end - start for start, end in zip((0, *boundaries), (*boundaries, self.fragment_length))]
+        sources: list[bytes] = []
+        labels: list[bytes] = []
+        regions: list[bytes] = []
+        first_record_index = 0
+        previous_language: str | None = None
+        for region_index, length in enumerate(lengths):
+            candidates = [
+                index for index, candidate in enumerate(self.records)
+                if candidate.language != previous_language
+            ] or list(range(len(self.records)))
+            record_index = rng.choice(candidates)
+            if region_index == 0:
+                first_record_index = record_index
+            record = self.records[record_index]
+            previous_language = record.language
+            largest_start = max(0, len(record.source) - length)
+            start = rng.randrange(largest_start + 1)
+            part_source = record.source[start : start + length]
+            sources.append(part_source)
+            labels.append(record.labels[start : start + length])
+            regions.append(self._region_bytes(record, start, len(part_source)))
+        return self._pack(
+            b"".join(sources), b"".join(labels), b"".join(regions),
+            LANGUAGE_IDS["unknown"], first_record_index, -1,
+        )
 
     def source_for(self, sample: dict[str, Tensor]) -> bytes:
         length = int(sample["source_length"])
@@ -116,11 +183,20 @@ def describe_sample(dataset: FragmentDataset, index: int) -> str:
     length = int(sample["source_length"])
     source = dataset.source_for(sample)
     labels = bytes(sample["labels"][:length].tolist())
+    region_labels = sample["region_labels"][:length].tolist()
     annotation = Annotation(source, labels, ())
     record = dataset.records[int(sample["file_index"])]
+    transitions = []
+    if region_labels:
+        start = 0
+        for end in range(1, len(region_labels) + 1):
+            if end == len(region_labels) or region_labels[end] != region_labels[start]:
+                transitions.append(f"{start}:{end}={LANGUAGE_NAMES[region_labels[start]]}")
+                start = end
     header = (
         f"{record.repository}/{record.path} bytes {int(sample['start_byte'])}:"
-        f"{int(sample['start_byte']) + length} ({length}/{dataset.fragment_length})"
+        f"{int(sample['start_byte']) + length} ({length}/{dataset.fragment_length})\n"
+        f"regions: {', '.join(transitions)}"
     )
     legend = "\n".join(
         f"{start:4}:{end:<4} {label_name(label):20} {text!r}"
@@ -137,6 +213,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--targeted-fraction", type=float, default=0.3)
+    parser.add_argument("--mixture-fraction", type=float, default=0.25)
+    parser.add_argument("--max-regions", type=int, default=4)
     args = parser.parse_args(argv)
     dataset = FragmentDataset(
         args.path,
@@ -144,6 +222,8 @@ def main(argv: list[str] | None = None) -> None:
         samples_per_epoch=args.count,
         targeted_fraction=args.targeted_fraction,
         seed=args.seed,
+        mixture_fraction=args.mixture_fraction,
+        max_regions=args.max_regions,
     )
     for index in range(len(dataset)):
         if index:
@@ -153,4 +233,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

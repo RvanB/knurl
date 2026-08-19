@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from neural_highlight.dataset.fragments import FragmentDataset, IGNORE_LABEL_ID
 from neural_highlight.metrics import ClassificationMetrics
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
+from neural_highlight.languages import LANGUAGE_NAMES
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,10 @@ class TrainConfig:
     seed: int = 0
     device: str = "auto"
     log_every_steps: int = 50
+    mixture_fraction: float = 0.25
+    max_regions: int = 4
+    region_loss_weight: float = 0.2
+    host_hint_dropout: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,18 @@ def flatten_metrics(prefix: str, metrics: dict[str, object]) -> dict[str, float 
         result[f"{prefix}/class/{class_name}/recall"] = float(values["recall"])
         result[f"{prefix}/class/{class_name}/f1"] = float(values["f1"])
         result[f"{prefix}/class/{class_name}/support"] = int(values["support"])
+    region = metrics.get("region")
+    if isinstance(region, dict):
+        result[f"{prefix}/region/accuracy"] = float(region["accuracy"])
+        result[f"{prefix}/region/macro_f1"] = float(region["macro_f1"])
+        region_classes = region["per_class"]
+        assert isinstance(region_classes, dict)
+        for class_name, values in region_classes.items():
+            assert isinstance(values, dict)
+            result[f"{prefix}/region/class/{class_name}/f1"] = float(values["f1"])
+            result[f"{prefix}/region/class/{class_name}/support"] = int(values["support"])
+    result[f"{prefix}/syntax_loss"] = float(metrics.get("syntax_loss", metrics["loss"]))
+    result[f"{prefix}/region_loss"] = float(metrics.get("region_loss", 0.0))
     return result
 
 
@@ -86,6 +103,8 @@ def run_epoch(
     optimizer: AdamW | None = None,
     step_callback: Callable[[dict[str, float | int]], None] | None = None,
     log_every_steps: int = 50,
+    region_loss_weight: float = 0.2,
+    host_hint_dropout: float = 0.0,
 ) -> dict[str, object]:
     if log_every_steps <= 0:
         raise ValueError("log_every_steps must be positive")
@@ -93,7 +112,10 @@ def run_epoch(
     model.train(training)
     criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL_ID)
     metrics = ClassificationMetrics(model.config.num_classes)
+    region_metrics = ClassificationMetrics(model.config.num_languages, LANGUAGE_NAMES)
     total_loss = 0.0
+    total_syntax_loss = 0.0
+    total_region_loss = 0.0
     batches = 0
     interval_loss = 0.0
     interval_examples = 0
@@ -102,21 +124,32 @@ def run_epoch(
     for batch in loader:
         input_ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
+        region_labels = batch["region_labels"].to(device)
         language_id = batch["language_id"].to(device)
+        if training and host_hint_dropout > 0:
+            dropped = torch.rand(language_id.shape, device=device) < host_hint_dropout
+            language_id = language_id.masked_fill(dropped, 0)
         with torch.set_grad_enabled(training):
-            logits = model(input_ids, language_id)
-            loss = criterion(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
+            logits, region_logits = model.forward_with_regions(input_ids, language_id)
+            syntax_loss = criterion(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
+            region_loss = criterion(
+                region_logits.reshape(-1, region_logits.shape[-1]), region_labels.reshape(-1)
+            )
+            loss = syntax_loss + region_loss_weight * region_loss
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 gradient_norm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
                 optimizer.step()
         total_loss += float(loss.detach())
+        total_syntax_loss += float(syntax_loss.detach())
+        total_region_loss += float(region_loss.detach())
         batches += 1
         interval_loss += float(loss.detach())
         interval_examples += input_ids.shape[0]
         interval_bytes += int(batch["attention_mask"].sum())
         metrics.update(logits, labels)
+        region_metrics.update(region_logits, region_labels)
         if training and step_callback is not None and (
             batches % log_every_steps == 0 or batches == len(loader)
         ):
@@ -145,6 +178,9 @@ def run_epoch(
             interval_started = time.perf_counter()
     result = metrics.compute()
     result["loss"] = total_loss / max(1, batches)
+    result["syntax_loss"] = total_syntax_loss / max(1, batches)
+    result["region_loss"] = total_region_loss / max(1, batches)
+    result["region"] = region_metrics.compute()
     return result
 
 
@@ -183,10 +219,13 @@ def train(
     train_data = FragmentDataset(
         train_path, train_config.fragment_length, train_config.train_samples,
         train_config.targeted_fraction, train_config.seed,
+        train_config.mixture_fraction, train_config.max_regions,
     )
     validation_data = FragmentDataset(
         validation_path, train_config.fragment_length, train_config.validation_samples,
         targeted_fraction=0.0, seed=train_config.seed + 1,
+        mixture_fraction=train_config.mixture_fraction,
+        max_regions=train_config.max_regions,
     )
     generator = torch.Generator().manual_seed(train_config.seed)
     train_loader = DataLoader(train_data, batch_size=train_config.batch_size, shuffle=True, generator=generator)
@@ -258,9 +297,14 @@ def train(
                 optimizer,
                 step_callback=log_training_step,
                 log_every_steps=train_config.log_every_steps,
+                region_loss_weight=train_config.region_loss_weight,
+                host_hint_dropout=train_config.host_hint_dropout,
             )
             with torch.no_grad():
-                validation_metrics = run_epoch(model, validation_loader, device)
+                validation_metrics = run_epoch(
+                    model, validation_loader, device,
+                    region_loss_weight=train_config.region_loss_weight,
+                )
             summary = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
             print(json.dumps(summary))
             save_checkpoint(output_dir / "last.pt", model, optimizer, epoch, train_config, validation_metrics)
@@ -301,6 +345,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--log-every-steps", type=int, default=50)
+    parser.add_argument("--mixture-fraction", type=float, default=0.25)
+    parser.add_argument("--max-regions", type=int, default=4)
+    parser.add_argument("--region-loss-weight", type=float, default=0.2)
+    parser.add_argument("--host-hint-dropout", type=float, default=0.5)
     parser.add_argument("--language-embedding", action="store_true")
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--layers", type=int, default=2)
@@ -317,6 +365,8 @@ def main(argv: list[str] | None = None) -> None:
         train_samples=args.train_samples, validation_samples=args.validation_samples,
         epochs=args.epochs, learning_rate=args.learning_rate, seed=args.seed, device=args.device,
         log_every_steps=args.log_every_steps,
+        mixture_fraction=args.mixture_fraction, max_regions=args.max_regions,
+        region_loss_weight=args.region_loss_weight, host_hint_dropout=args.host_hint_dropout,
     )
     model_config = BiGRUConfig(
         hidden_size=args.hidden_size, num_layers=args.layers,

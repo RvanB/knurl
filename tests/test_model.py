@@ -1,7 +1,7 @@
 import torch
 
 from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID
-from neural_highlight.infer import highlight
+from neural_highlight.infer import analyze, highlight
 from neural_highlight.metrics import ClassificationMetrics
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
 from neural_highlight.train import flatten_metrics, run_epoch
@@ -33,6 +33,8 @@ def test_inference_returns_one_label_per_byte() -> None:
     source = "café()".encode()
     assert len(highlight(model, source, "python")) == len(source)
     assert highlight(model, b"") == b""
+    syntax, regions = analyze(model, source, "python")
+    assert len(syntax) == len(regions) == len(source)
 
 
 def test_wandb_metrics_are_flattened() -> None:
@@ -56,6 +58,7 @@ def test_training_step_callback_reports_optimizer_telemetry() -> None:
     batch = {
         "input_ids": torch.tensor([[100, 101, 102, 103]]),
         "labels": torch.tensor([[1, 2, 2, 0]]),
+        "region_labels": torch.tensor([[2, 2, 2, 2]]),
         "attention_mask": torch.tensor([[True, True, True, True]]),
         "language_id": torch.tensor([1]),
     }

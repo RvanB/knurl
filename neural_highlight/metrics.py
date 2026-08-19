@@ -10,8 +10,9 @@ from neural_highlight.labels import LABEL_NAMES
 
 
 class ClassificationMetrics:
-    def __init__(self, num_classes: int = len(LABEL_NAMES)) -> None:
+    def __init__(self, num_classes: int = len(LABEL_NAMES), class_names: tuple[str, ...] = LABEL_NAMES) -> None:
         self.num_classes = num_classes
+        self.class_names = class_names
         self.confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
 
     def update(self, logits: Tensor, targets: Tensor) -> None:
@@ -39,7 +40,7 @@ class ClassificationMetrics:
                 "f1": float(f1[index]),
                 "support": int(support[index]),
             }
-            for index, name in enumerate(LABEL_NAMES)
+            for index, name in enumerate(self.class_names)
         }
         present = support > 0
         return {
@@ -47,4 +48,3 @@ class ClassificationMetrics:
             "macro_f1": float(f1[present].mean()) if present.any() else 0.0,
             "per_class": per_class,
         }
-

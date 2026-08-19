@@ -16,18 +16,24 @@ class StoredFile:
     path: str
     source: bytes
     labels: bytes
+    region_labels: bytes | None = None
 
     def to_json(self) -> str:
         if len(self.source) != len(self.labels):
             raise ValueError("source and labels must have equal lengths")
-        return json.dumps(
-            {
+        if self.region_labels is not None and len(self.source) != len(self.region_labels):
+            raise ValueError("source and region labels must have equal lengths")
+        value = {
                 "repository": self.repository,
                 "language": self.language,
                 "path": self.path,
                 "source_b64": base64.b64encode(self.source).decode("ascii"),
                 "labels_b64": base64.b64encode(self.labels).decode("ascii"),
-            },
+            }
+        if self.region_labels is not None:
+            value["region_labels_b64"] = base64.b64encode(self.region_labels).decode("ascii")
+        return json.dumps(
+            value,
             separators=(",", ":"),
             ensure_ascii=True,
         )
@@ -41,6 +47,11 @@ class StoredFile:
             path=value["path"],
             source=base64.b64decode(value["source_b64"]),
             labels=base64.b64decode(value["labels_b64"]),
+            region_labels=(
+                base64.b64decode(value["region_labels_b64"])
+                if "region_labels_b64" in value
+                else None
+            ),
         )
 
 
@@ -53,4 +64,3 @@ def read_records(path: Path) -> Iterator[StoredFile]:
         for line in stream:
             if line.strip():
                 yield StoredFile.from_json(line)
-

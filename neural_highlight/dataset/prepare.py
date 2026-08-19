@@ -12,6 +12,7 @@ from neural_highlight.dataset.annotate import annotate_python
 from neural_highlight.dataset.download import stream_stack_smol, stream_stack_smol_xs, take_usable_files
 from neural_highlight.dataset.split import repository_split
 from neural_highlight.dataset.storage import StoredFile, write_record
+from neural_highlight.languages import LANGUAGE_IDS
 
 
 SUPPORTED_LANGUAGES = ("python",)
@@ -50,6 +51,7 @@ def prepare_dataset(
                     path=str(raw["path"]),
                     source=annotation.source,
                     labels=annotation.labels,
+                    region_labels=bytes([LANGUAGE_IDS[language]]) * len(annotation.source),
                 ),
             )
             counts[split] += 1

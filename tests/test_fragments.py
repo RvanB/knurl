@@ -12,10 +12,10 @@ def make_dataset(path: Path) -> None:
         StoredFile("r1", "python", "short.py", b"x=1", bytes([2, 11, 10])),
         StoredFile(
             "r2",
-            "python",
-            "long.py",
-            b"# comment\nvalue",
-            bytes([Label.COMMENT] * 9 + [Label.PLAIN] + [Label.IDENTIFIER] * 5),
+            "javascript",
+            "long.js",
+            b"// comment\nvalue",
+            bytes([Label.COMMENT] * 10 + [Label.PLAIN] + [Label.IDENTIFIER] * 5),
         ),
     ]
     with path.open("w", encoding="utf-8") as stream:
@@ -54,3 +54,16 @@ def test_targeted_sampling_contains_non_plain_label(tmp_path: Path) -> None:
     for sample in dataset:
         valid = sample["labels"][sample["labels"] != IGNORE_LABEL_ID]
         assert torch.any(valid != Label.PLAIN)
+
+
+def test_synthetic_mixture_has_per_byte_language_switches(tmp_path: Path) -> None:
+    path = tmp_path / "train.jsonl"
+    make_dataset(path)
+    dataset = FragmentDataset(
+        path, fragment_length=6, samples_per_epoch=10,
+        mixture_fraction=1.0, max_regions=2,
+    )
+    for sample in dataset:
+        valid = sample["region_labels"][sample["region_labels"] != IGNORE_LABEL_ID]
+        assert len(torch.unique(valid)) == 2
+        assert int(sample["language_id"]) == 0

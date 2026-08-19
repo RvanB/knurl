@@ -9,6 +9,7 @@ import torch
 
 from neural_highlight.dataset.fragments import LANGUAGE_IDS
 from neural_highlight.labels import Label, label_name
+from neural_highlight.languages import LANGUAGE_NAMES
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
 
 
@@ -21,12 +22,21 @@ def load_model(path: Path, device: torch.device) -> ByteBiGRU:
 
 @torch.inference_mode()
 def highlight(model: ByteBiGRU, source: bytes, language: str = "unknown") -> bytes:
+    return analyze(model, source, language)[0]
+
+
+@torch.inference_mode()
+def analyze(model: ByteBiGRU, source: bytes, language: str = "unknown") -> tuple[bytes, bytes]:
+    """Return syntax and local-language predictions for every source byte."""
     if not source:
-        return b""
+        return b"", b""
     device = next(model.parameters()).device
     input_ids = torch.tensor(list(source), dtype=torch.long, device=device).unsqueeze(0)
     language_id = torch.tensor([LANGUAGE_IDS.get(language, 0)], device=device)
-    return bytes(model(input_ids, language_id).argmax(dim=-1).squeeze(0).cpu().tolist())
+    syntax_logits, region_logits = model.forward_with_regions(input_ids, language_id)
+    syntax = bytes(syntax_logits.argmax(dim=-1).squeeze(0).cpu().tolist())
+    regions = bytes(region_logits.argmax(dim=-1).squeeze(0).cpu().tolist())
+    return syntax, regions
 
 
 def spans(source: bytes, labels: bytes):
@@ -47,11 +57,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
     source = args.source.read_bytes()
-    labels = highlight(load_model(args.checkpoint, torch.device(args.device)), source, args.language)
-    for start, end, label, text in spans(source, labels):
-        print(f"{start:6}:{end:<6} {label_name(label):20} {text!r}")
+    labels, regions = analyze(
+        load_model(args.checkpoint, torch.device(args.device)), source, args.language
+    )
+    start = 0
+    for index in range(1, len(source) + 1):
+        if index == len(source) or labels[index] != labels[start] or regions[index] != regions[start]:
+            print(
+                f"{start:6}:{index:<6} {LANGUAGE_NAMES[regions[start]]:12} "
+                f"{label_name(labels[start]):20} {source[start:index]!r}"
+            )
+            start = index
 
 
 if __name__ == "__main__":
     main()
-
