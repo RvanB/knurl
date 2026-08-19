@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
+import math
 import random
 import time
 from dataclasses import asdict, dataclass
@@ -27,7 +29,7 @@ class TrainConfig:
     batch_size: int = 32
     train_samples: int = 4096
     validation_samples: int = 512
-    epochs: int = 10
+    epochs: int = 0
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     targeted_fraction: float = 0.3
@@ -38,6 +40,9 @@ class TrainConfig:
     max_regions: int = 4
     region_loss_weight: float = 0.2
     host_hint_dropout: float = 0.5
+    early_stopping_patience: int = 3
+    early_stopping_metric: str = "accuracy"
+    early_stopping_min_delta: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,35 @@ class WandbConfig:
     mode: str = "online"
     tags: tuple[str, ...] = ()
     log_model: bool = True
+
+
+class EarlyStopping:
+    """Track meaningful validation improvements and patience exhaustion."""
+
+    def __init__(self, patience: int, min_delta: float = 0.0) -> None:
+        if patience < 0:
+            raise ValueError("early-stopping patience cannot be negative")
+        if min_delta < 0:
+            raise ValueError("early-stopping min delta cannot be negative")
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best = -math.inf
+        self.bad_epochs = 0
+        self._needs_after_best = False
+
+    def update(self, value: float) -> tuple[bool, bool, bool]:
+        """Return ``(improved, should_stop, save_after_best)``."""
+        improved = math.isfinite(value) and value > self.best + self.min_delta
+        if improved:
+            self.best = value
+            self.bad_epochs = 0
+            self._needs_after_best = True
+            return True, False, False
+        self.bad_epochs += 1
+        save_after_best = self._needs_after_best
+        self._needs_after_best = False
+        should_stop = self.patience > 0 and self.bad_epochs >= self.patience
+        return False, should_stop, save_after_best
 
 
 def flatten_metrics(prefix: str, metrics: dict[str, object]) -> dict[str, float | int]:
@@ -214,6 +248,8 @@ def train(
     model_config: BiGRUConfig,
     wandb_config: WandbConfig | None = None,
 ) -> Path:
+    if train_config.epochs <= 0 and train_config.early_stopping_patience <= 0:
+        raise ValueError("unlimited epochs require positive early-stopping patience")
     set_seed(train_config.seed)
     device = resolve_device(train_config.device)
     train_data = FragmentDataset(
@@ -262,8 +298,11 @@ def train(
         run.define_metric("validation/*", step_metric="epoch")
         run.define_metric("train_step/*", step_metric="global_step")
         run.watch(model, log="gradients", log_freq=max(1, train_config.log_every_steps))
-    best_f1 = -1.0
     best_path = output_dir / "best.pt"
+    after_best_path = output_dir / "after-best.pt"
+    stopper = EarlyStopping(
+        train_config.early_stopping_patience, train_config.early_stopping_min_delta
+    )
     global_step = 0
 
     def log_training_step(values: dict[str, float | int]) -> None:
@@ -285,7 +324,12 @@ def train(
             run.log(payload, step=global_step)
 
     try:
-        for epoch in range(1, train_config.epochs + 1):
+        epochs = (
+            itertools.count(1)
+            if train_config.epochs <= 0
+            else range(1, train_config.epochs + 1)
+        )
+        for epoch in epochs:
             train_data.set_epoch(epoch)
             validation_data.set_epoch(epoch)
             if device.type == "cuda":
@@ -308,21 +352,41 @@ def train(
             summary = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
             print(json.dumps(summary))
             save_checkpoint(output_dir / "last.pt", model, optimizer, epoch, train_config, validation_metrics)
-            improved = float(validation_metrics["macro_f1"]) > best_f1
+            monitored_value = float(validation_metrics[train_config.early_stopping_metric])
+            improved, should_stop, save_after_best = stopper.update(monitored_value)
             if improved:
-                best_f1 = float(validation_metrics["macro_f1"])
                 save_checkpoint(best_path, model, optimizer, epoch, train_config, validation_metrics)
+            elif save_after_best:
+                save_checkpoint(
+                    after_best_path, model, optimizer, epoch, train_config, validation_metrics
+                )
+            stopping = {
+                "metric": train_config.early_stopping_metric,
+                "value": monitored_value,
+                "best": stopper.best,
+                "bad_epochs": stopper.bad_epochs,
+                "patience": stopper.patience,
+                "improved": improved,
+                "should_stop": should_stop,
+            }
+            print(json.dumps({"epoch": epoch, "early_stopping": stopping}))
             if run is not None:
                 run.log(
                     {
                         "epoch": epoch,
-                        "best/validation_macro_f1": best_f1,
+                        f"best/validation_{train_config.early_stopping_metric}": stopper.best,
                         "checkpoint/improved": int(improved),
+                        "checkpoint/saved_after_best": int(save_after_best),
+                        "early_stopping/bad_epochs": stopper.bad_epochs,
+                        "early_stopping/patience": stopper.patience,
                         **flatten_metrics("train", train_metrics),
                         **flatten_metrics("validation", validation_metrics),
                     },
                     step=global_step,
                 )
+            if should_stop:
+                print(json.dumps({"stopped_early": True, "epoch": epoch, **stopping}))
+                break
         if run is not None and tracking.log_model:
             run.log_model(path=str(best_path), name=f"{run.id}-best-bigru")
     finally:
@@ -340,7 +404,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--train-samples", type=int, default=4096)
     parser.add_argument("--validation-samples", type=int, default=512)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument(
+        "--epochs", type=int, default=0,
+        help="maximum epochs; 0 means unlimited and relies on early stopping",
+    )
+    parser.add_argument("--early-stopping-patience", type=int, default=3)
+    parser.add_argument(
+        "--early-stopping-metric", choices=("accuracy", "macro_f1"), default="accuracy"
+    )
+    parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
@@ -367,6 +439,9 @@ def main(argv: list[str] | None = None) -> None:
         log_every_steps=args.log_every_steps,
         mixture_fraction=args.mixture_fraction, max_regions=args.max_regions,
         region_loss_weight=args.region_loss_weight, host_hint_dropout=args.host_hint_dropout,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_metric=args.early_stopping_metric,
+        early_stopping_min_delta=args.early_stopping_min_delta,
     )
     model_config = BiGRUConfig(
         hidden_size=args.hidden_size, num_layers=args.layers,

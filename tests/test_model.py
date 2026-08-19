@@ -4,7 +4,7 @@ from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID
 from neural_highlight.infer import analyze, highlight
 from neural_highlight.metrics import ClassificationMetrics
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
-from neural_highlight.train import flatten_metrics, run_epoch
+from neural_highlight.train import EarlyStopping, flatten_metrics, run_epoch
 
 
 def test_bigru_shape_and_language_modes() -> None:
@@ -69,3 +69,12 @@ def test_training_step_callback_reports_optimizer_telemetry() -> None:
     assert reports[0]["loss"] > 0
     assert reports[0]["gradient_norm"] >= 0
     assert reports[0]["bytes_per_second"] > 0
+
+
+def test_early_stopping_keeps_epoch_after_latest_improvement() -> None:
+    stopping = EarlyStopping(patience=2, min_delta=0.01)
+    assert stopping.update(0.50) == (True, False, False)
+    assert stopping.update(0.505) == (False, False, True)
+    assert stopping.update(0.52) == (True, False, False)
+    assert stopping.update(0.51) == (False, False, True)
+    assert stopping.update(0.50) == (False, True, False)

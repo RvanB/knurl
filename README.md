@@ -86,6 +86,14 @@ per-class precision/recall/F1/support, gradient statistics, and the best model
 checkpoint. Use `--wandb-mode offline` to test logging without an account, or
 `--no-wandb-model` to keep checkpoints local.
 
+Training defaults to no epoch cap (`--epochs 0`) and stops when validation
+accuracy has failed to improve for three epochs. Configure this with
+`--early-stopping-patience`, `--early-stopping-min-delta`, and
+`--early-stopping-metric {accuracy,macro_f1}`. `best.pt` is the latest improving
+checkpoint, `after-best.pt` is the first epoch after that improvement, and
+`last.pt` is the final completed epoch. A positive `--epochs` remains available
+as a safety cap.
+
 Optimizer-step telemetry is emitted every 50 batches by default. It includes
 instantaneous/rolling loss, learning rate, gradient norm, throughput, and CUDA
 memory. Change the cadence with `--log-every-steps`; validation and full
