@@ -66,6 +66,26 @@ encoder. Region loss defaults to 20% of the total loss, and host-language hints
 are dropped for half of training samples. Configure these with
 `--region-loss-weight` and `--host-hint-dropout`.
 
+Render a file using the model's predicted syntax classes:
+
+```sh
+uv run python -m neural_highlight.infer runs/multilingual-bigru/best.pt \
+  notes.txt --language unknown --device cuda --color
+```
+
+Inline text and stdin are also supported:
+
+```sh
+uv run python -m neural_highlight.infer runs/multilingual-bigru/best.pt \
+  --text 'const answer = 42;' --language unknown --device cuda --color
+
+printf 'def hello():\n    return 42\n' | uv run python -m neural_highlight.infer \
+  runs/multilingual-bigru/best.pt - --language unknown --device cuda --color
+```
+
+Omit `--color` to print byte ranges with both predicted local language and
+syntax class, which is useful for debugging classification behavior.
+
 ### Watch training with Weights & Biases
 
 Authenticate once with `uv run wandb login`, then add tracking flags:

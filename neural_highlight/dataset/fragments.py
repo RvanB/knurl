@@ -14,7 +14,7 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 from neural_highlight.dataset.annotate import Annotation, colored, iter_spans
-from neural_highlight.dataset.storage import StoredFile, read_records
+from neural_highlight.dataset.storage import IndexedJsonlStore, StoredFile
 from neural_highlight.labels import Label, label_name
 from neural_highlight.languages import LANGUAGE_IDS, LANGUAGE_NAMES
 
@@ -63,11 +63,11 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             raise ValueError("max_regions must be at least two")
         paths = [Path(path)] if isinstance(path, (str, Path)) else [Path(item) for item in path]
         self.paths = tuple(paths)
-        self.records = tuple(record for item in paths for record in read_records(item))
-        if not self.records:
+        self.store = IndexedJsonlStore(paths)
+        if not len(self.store):
             raise ValueError(f"no records found in {paths}")
         self.fragment_length = fragment_length
-        self.samples_per_epoch = samples_per_epoch or len(self.records)
+        self.samples_per_epoch = samples_per_epoch or len(self.store)
         self.targeted_fraction = targeted_fraction
         self.seed = seed
         self.mixture_fraction = mixture_fraction
@@ -82,10 +82,18 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             # Restricted environments may block torch_shm_manager. The trainer
             # detects this and restarts workers each epoch instead.
             self.epoch_is_shared = False
-        self._interesting = tuple(
-            tuple(index for index, label in enumerate(record.labels) if label != Label.PLAIN)
-            for record in self.records
-        )
+        by_language: dict[str, list[int]] = {}
+        for record_index in range(len(self.store)):
+            by_language.setdefault(self.store.language(record_index), []).append(record_index)
+        self._indices_by_language = {key: tuple(value) for key, value in by_language.items()}
+        self._languages = tuple(by_language)
+
+    @property
+    def record_count(self) -> int:
+        return len(self.store)
+
+    def record_at(self, index: int) -> StoredFile:
+        return self.store[index]
 
     def __len__(self) -> int:
         return self.samples_per_epoch
@@ -96,14 +104,21 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
     def _rng(self, index: int) -> random.Random:
         return random.Random((self.seed << 64) ^ (int(self._epoch) << 32) ^ index)
 
-    def _crop_start(self, record_index: int, rng: random.Random) -> int:
-        record = self.records[record_index]
+    def _crop_start(self, record: StoredFile, rng: random.Random) -> int:
         largest_start = max(0, len(record.source) - self.fragment_length)
-        interesting = self._interesting[record_index]
-        if interesting and rng.random() < self.targeted_fraction:
-            center = rng.choice(interesting)
-            jitter = rng.randrange(-self.fragment_length // 4, self.fragment_length // 4 + 1)
-            return min(largest_start, max(0, center - self.fragment_length // 2 + jitter))
+        if record.labels and rng.random() < self.targeted_fraction:
+            # Rejection sampling avoids retaining every non-plain byte offset.
+            # Syntax-labeled bytes are common, so this normally succeeds quickly.
+            for _ in range(32):
+                center = rng.randrange(len(record.labels))
+                if record.labels[center] != Label.PLAIN:
+                    jitter = rng.randrange(
+                        -self.fragment_length // 4, self.fragment_length // 4 + 1
+                    )
+                    return min(
+                        largest_start,
+                        max(0, center - self.fragment_length // 2 + jitter),
+                    )
         return rng.randrange(largest_start + 1)
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
@@ -150,9 +165,9 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         }
 
     def _single_sample(self, rng: random.Random) -> dict[str, Tensor]:
-        record_index = rng.randrange(len(self.records))
-        record = self.records[record_index]
-        start = self._crop_start(record_index, rng)
+        record_index = rng.randrange(len(self.store))
+        record = self.store[record_index]
+        start = self._crop_start(record, rng)
         source = record.source[start : start + self.fragment_length]
         labels = record.labels[start : start + self.fragment_length]
         language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
@@ -171,14 +186,14 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         first_record_index = 0
         previous_language: str | None = None
         for region_index, length in enumerate(lengths):
-            candidates = [
-                index for index, candidate in enumerate(self.records)
-                if candidate.language != previous_language
-            ] or list(range(len(self.records)))
-            record_index = rng.choice(candidates)
+            language_choices = [
+                language for language in self._languages if language != previous_language
+            ] or list(self._languages)
+            language = rng.choice(language_choices)
+            record_index = rng.choice(self._indices_by_language[language])
             if region_index == 0:
                 first_record_index = record_index
-            record = self.records[record_index]
+            record = self.store[record_index]
             previous_language = record.language
             largest_start = max(0, len(record.source) - length)
             start = rng.randrange(largest_start + 1)
@@ -203,7 +218,7 @@ def describe_sample(dataset: FragmentDataset, index: int) -> str:
     labels = bytes(sample["labels"][:length].tolist())
     region_labels = sample["region_labels"][:length].tolist()
     annotation = Annotation(source, labels, ())
-    record = dataset.records[int(sample["file_index"])]
+    record = dataset.record_at(int(sample["file_index"]))
     transitions = []
     if region_labels:
         start = 0

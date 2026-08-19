@@ -76,4 +76,4 @@ def test_dataset_combines_multiple_split_files(tmp_path: Path) -> None:
     make_dataset(first)
     make_dataset(second)
     dataset = FragmentDataset([first, second], fragment_length=4)
-    assert len(dataset.records) == 4
+    assert dataset.record_count == 4

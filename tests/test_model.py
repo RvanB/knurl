@@ -1,7 +1,7 @@
 import torch
 
 from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID
-from neural_highlight.infer import analyze, highlight
+from neural_highlight.infer import analyze, highlight, main
 from neural_highlight.metrics import ClassificationMetrics
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
 from neural_highlight.train import EarlyStopping, flatten_metrics, run_epoch
@@ -78,3 +78,21 @@ def test_early_stopping_keeps_epoch_after_latest_improvement() -> None:
     assert stopping.update(0.52) == (True, False, False)
     assert stopping.update(0.51) == (False, False, True)
     assert stopping.update(0.50) == (False, True, False)
+
+
+def test_inference_cli_accepts_inline_colored_text(tmp_path, capsys) -> None:
+    model = ByteBiGRU(BiGRUConfig(hidden_size=8, num_layers=1))
+    with torch.no_grad():
+        model.classifier.weight.zero_()
+        model.classifier.bias.zero_()
+        model.classifier.bias[1] = 1
+    checkpoint = tmp_path / "model.pt"
+    torch.save(
+        {"model_config": model.config.to_dict(), "model_state": model.state_dict()},
+        checkpoint,
+    )
+    main([str(checkpoint), "--text", "return 42", "--color"])
+    output = capsys.readouterr().out
+    assert "return" in output
+    assert "42" in output
+    assert "\033[" in output

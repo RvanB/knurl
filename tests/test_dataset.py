@@ -2,7 +2,7 @@ from pathlib import Path
 
 from neural_highlight.dataset.download import take_usable_files
 from neural_highlight.dataset.split import repository_split
-from neural_highlight.dataset.storage import StoredFile, read_records, write_record
+from neural_highlight.dataset.storage import IndexedJsonlStore, StoredFile, read_records, write_record
 
 
 def test_repository_split_is_stable_and_repository_scoped() -> None:
@@ -35,3 +35,21 @@ def test_filter_caps_accepted_files_not_input_rows() -> None:
     ]
     result = list(take_usable_files(rows, max_files=1, max_bytes=10))
     assert [row["path"] for row in result] == ["a.py"]
+
+
+def test_indexed_store_reads_records_lazily(tmp_path: Path) -> None:
+    path = tmp_path / "records.jsonl"
+    records = [
+        StoredFile("r1", "python", "a.py", b"x", bytes([2])),
+        StoredFile("r2", "javascript", "b.js", b"y", bytes([2])),
+    ]
+    with path.open("w", encoding="utf-8") as stream:
+        for record in records:
+            write_record(stream, record)
+    store = IndexedJsonlStore([path])
+    assert len(store) == 2
+    assert store.language(1) == "javascript"
+    assert all(mapping is None for mapping in store._maps)
+    assert store[0] == records[0]
+    assert store._maps[0] is not None
+    store.close()
