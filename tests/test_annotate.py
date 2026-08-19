@@ -1,6 +1,6 @@
 import pytest
 
-from neural_highlight.dataset.annotate import annotate, annotate_python
+from neural_highlight.dataset.annotate import annotate, annotate_python, sanitize_comment_code
 from neural_highlight.labels import Label
 
 
@@ -63,3 +63,24 @@ def test_block_comment_body_is_unsupervised_but_delimiters_are_kept() -> None:
     assert annotation.label_mask[closing : closing + 2] == b"\x01\x01"
     assert not any(annotation.label_mask[hidden : hidden + len("fn hidden")])
     assert all(annotation.label_mask[live : live + len("fn live")])
+
+
+def test_comment_sanitizer_removes_code_and_keeps_supervised_prose() -> None:
+    source = """/*
+This function returns the configured value.
+```rust
+fn hidden() { return 1; }
+```
+Callers should handle errors from this operation.
+*/
+fn live() {}
+"""
+    sanitized = sanitize_comment_code(source, "rust")
+    assert b"fn hidden" not in sanitized
+    assert b"configured value" in sanitized
+    assert b"handle errors" in sanitized
+    assert b"fn live" in sanitized
+    annotation = annotate(sanitized, "rust", supervise_comment_bodies=True)
+    prose_start = sanitized.index(b"This function")
+    assert annotation.labels[prose_start] == Label.COMMENT
+    assert all(annotation.label_mask)

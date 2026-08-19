@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import random
 import re
+
 from neural_highlight.dataset.storage import IndexedJsonlStore, StoredFile
+from neural_highlight.labels import Label
 
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z'-]{1,}")
@@ -14,16 +16,19 @@ _CODE_PUNCTUATION = frozenset("{}[]();=<>`|&")
 
 def prose_lines(record: StoredFile) -> tuple[bytes, ...]:
     """Return high-confidence natural-language lines from masked comment bodies."""
-    if record.label_mask is None:
-        return ()
+    if record.label_mask is not None and 0 in record.label_mask:
+        # Backward compatibility for datasets created by the masking policy.
+        masked = bytes(not value for value in record.label_mask)
+    else:
+        masked = bytes(value == Label.COMMENT for value in record.labels)
     candidates: list[bytes] = []
     start = 0
     while start < len(record.source):
-        if record.label_mask[start]:
+        if not masked[start]:
             start += 1
             continue
         end = start + 1
-        while end < len(record.source) and not record.label_mask[end]:
+        while end < len(record.source) and masked[end]:
             end += 1
         text = record.source[start:end].decode("utf-8", errors="ignore")
         for raw_line in text.splitlines():

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Iterable
+import re
 
 import tree_sitter_python
 import tree_sitter_c
@@ -60,6 +61,9 @@ _LANGUAGE_SPECS = {
 }
 SUPPORTED_LANGUAGES = tuple(_LANGUAGE_SPECS)
 _COMPILED: dict[str, tuple[Language, Query]] = {}
+_PROSE_WORD = re.compile(rb"[A-Za-z][A-Za-z'-]{1,}")
+_COMMENT_DECORATION = re.compile(rb"^\s*(?:\*+|//+|#+)?\s*")
+_CODE_PUNCTUATION = frozenset(b"{}[]();=<>`|&")
 
 
 def _teacher(language: str) -> tuple[Language, Query]:
@@ -112,7 +116,12 @@ def _comment_delimiters(source: bytes) -> tuple[int, int]:
     return 0, 0
 
 
-def annotate(source: str | bytes, language: str) -> Annotation:
+def annotate(
+    source: str | bytes,
+    language: str,
+    *,
+    supervise_comment_bodies: bool = False,
+) -> Annotation:
     """Parse and annotate a complete source unit, preserving UTF-8 byte offsets."""
     source_bytes = source.encode("utf-8") if isinstance(source, str) else source
     grammar, query = _teacher(language)
@@ -134,6 +143,12 @@ def annotate(source: str | bytes, language: str) -> Annotation:
         if capture.label is Label.COMMENT:
             captured = source_bytes[capture.start_byte : capture.end_byte]
             opening_length, closing_length = _comment_delimiters(captured)
+            if supervise_comment_bodies:
+                labels[capture.start_byte : capture.end_byte] = bytes([Label.COMMENT]) * (
+                    capture.end_byte - capture.start_byte
+                )
+                captures.append(capture)
+                continue
             label_mask[capture.start_byte : capture.end_byte] = bytes(
                 capture.end_byte - capture.start_byte
             )
@@ -154,6 +169,56 @@ def annotate(source: str | bytes, language: str) -> Annotation:
         captures.append(capture)
 
     return Annotation(source_bytes, bytes(labels), tuple(captures), bytes(label_mask))
+
+
+def _looks_like_prose(line: bytes) -> bool:
+    cleaned = _COMMENT_DECORATION.sub(b"", line).strip()
+    if not cleaned:
+        return True
+    words = _PROSE_WORD.findall(cleaned)
+    visible = sum(not chr(value).isspace() for value in cleaned)
+    if not visible:
+        return True
+    punctuation = sum(value in _CODE_PUNCTUATION for value in cleaned)
+    alpha_ratio = sum(chr(value).isalpha() for value in cleaned) / visible
+    marker = cleaned.upper().startswith((b"TODO", b"FIXME", b"NOTE", b"WARNING"))
+    return punctuation / visible <= 0.08 and alpha_ratio >= 0.5 and (
+        len(words) >= 3 or marker or cleaned.endswith((b".", b"!", b"?", b":"))
+    )
+
+
+def sanitize_comment_code(source: str | bytes, language: str) -> bytes:
+    """Remove code-like lines and fenced blocks from teacher-captured comments."""
+    source_bytes = source.encode("utf-8") if isinstance(source, str) else source
+    annotation = annotate(source_bytes, language)
+    comments = [capture for capture in annotation.captures if capture.label is Label.COMMENT]
+    if not comments:
+        return source_bytes
+    output = bytearray()
+    cursor = 0
+    for capture in sorted(comments, key=lambda item: item.start_byte):
+        if capture.start_byte < cursor:
+            continue
+        output.extend(source_bytes[cursor : capture.start_byte])
+        captured = source_bytes[capture.start_byte : capture.end_byte]
+        opening_length, closing_length = _comment_delimiters(captured)
+        opening = captured[:opening_length]
+        closing = captured[len(captured) - closing_length :] if closing_length else b""
+        body_end = len(captured) - closing_length if closing_length else len(captured)
+        body = captured[opening_length:body_end]
+        kept: list[bytes] = []
+        fenced = False
+        for line in body.splitlines(keepends=True):
+            cleaned = _COMMENT_DECORATION.sub(b"", line).strip()
+            if cleaned.startswith((b"```", b"~~~")):
+                fenced = not fenced
+                continue
+            if not fenced and _looks_like_prose(line):
+                kept.append(line)
+        output.extend(opening + b"".join(kept) + closing)
+        cursor = capture.end_byte
+    output.extend(source_bytes[cursor:])
+    return bytes(output)
 
 
 def annotate_python(source: str | bytes) -> Annotation:

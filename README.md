@@ -48,15 +48,15 @@ target and a local language-region target. Mixed samples have an `unknown` host
 hint, allowing a buffer to switch languages without being a valid container
 document. Tune this with `--mixture-fraction` and `--max-regions`.
 
-Real Tree-sitter comment bodies are treated as uncertain supervision: their
-bytes remain visible, but syntax and region losses are masked. Comment
-delimiters remain supervised. Another 10% of samples wrap genuine annotated
-code in comment delimiters while preserving its code labels, preventing `/*`
-or `<!--` from becoming a blanket "everything is a comment" cue. Configure
-this with `--delimiter-wrap-fraction`.
+Preparation removes fenced blocks and conservatively code-like lines from
+Tree-sitter comment captures. The remaining prose and delimiters are fully
+supervised as `comment`; comment losses are not masked. Another 10% of samples
+wrap genuine annotated code in comment delimiters while preserving its code
+labels, preventing `/*` or `<!--` from becoming a blanket "everything is a
+comment" cue. Configure this with `--delimiter-wrap-fraction`.
 
-Older annotation files remain readable but retain their opaque-comment targets.
-Regenerate annotations before training models intended to use this policy.
+Older annotation files remain readable but do not have this sanitized-comment
+policy. Regenerate annotations before training a new model.
 
 ## Train the first BiGRU
 
@@ -182,10 +182,9 @@ uv run python scripts/train_model.py \
   --mixture-fraction 0.25 --max-regions 4 --wandb
 ```
 
-Comment bodies in the annotated files are initially masked because delimiters
-alone do not tell us whether their contents are prose or embedded code. During
-training, `--prose-code-fraction` (default `0.15`) conservatively extracts
-natural-language lines from those bodies and mixes them with genuine labeled
+During training, `--prose-code-fraction` (default `0.15`) extracts prose from
+the sanitized, fully supervised comments and mixes it with genuine labeled
 code. The prose receives the `comment` target while the code retains its syntax
-targets; half of these synthetic examples omit comment delimiters. Validation
-does not use this augmentation. Set the fraction to zero to disable it.
+targets; half of these synthetic examples omit comment delimiters. Thus all
+embedded-code examples have labels known by construction. Validation does not
+use this augmentation. Set the fraction to zero to disable it.
