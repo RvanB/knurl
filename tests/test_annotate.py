@@ -1,4 +1,6 @@
-from neural_highlight.dataset.annotate import annotate_python
+import pytest
+
+from neural_highlight.dataset.annotate import annotate, annotate_python
 from neural_highlight.labels import Label
 
 
@@ -27,3 +29,21 @@ def test_empty_source() -> None:
     annotation = annotate_python(b"")
     assert annotation.labels == b""
     assert annotation.captures == ()
+
+
+@pytest.mark.parametrize(
+    ("language", "source", "token", "expected"),
+    [
+        ("javascript", "const x = 1;", "const", Label.KEYWORD),
+        ("typescript", "const x: number = 1;", "number", Label.TYPE),
+        ("html", '<div class="x">hi</div>', "div", Label.TYPE),
+        ("css", ".x { color: red; }", "color", Label.PROPERTY),
+        ("rust", "fn f() -> i32 { 1 }", "fn", Label.KEYWORD),
+        ("c", "int f(void) { return 1; }", "return", Label.KEYWORD),
+        ("c++", "class X { public: int f(); };", "class", Label.KEYWORD),
+        ("go", "func f() int { return 1 }", "func", Label.KEYWORD),
+        ("java", "class X { int f() { return 1; } }", "class", Label.KEYWORD),
+    ],
+)
+def test_multilingual_teacher(language: str, source: str, token: str, expected: Label) -> None:
+    assert labels_for(annotate(source, language), token) == {expected}

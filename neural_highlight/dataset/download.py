@@ -10,6 +10,10 @@ from typing import Any
 
 STACK_SMOL_DATASET = "bigcode/the-stack-smol"
 STACK_SMOL_XS_DATASET = "bigcode/the-stack-smol-xs"
+_EXTENSIONS = {
+    "python": "py", "javascript": "js", "typescript": "ts", "html": "html",
+    "css": "css", "rust": "rs", "c": "c", "c++": "cpp", "go": "go", "java": "java",
+}
 
 
 def stream_stack_smol(language: str = "python") -> Iterator[Mapping[str, Any]]:
@@ -41,7 +45,7 @@ def stream_stack_smol_xs(language: str = "python") -> Iterator[Mapping[str, Any]
             # XS omits repository and path. Content-derived IDs are explicit and
             # stable, but cannot provide leakage protection at repository level.
             record["repository_name"] = f"xs-content-{digest}"
-            record["path"] = f"{index:06d}.py"
+            record["path"] = f"{index:06d}.{_EXTENSIONS.get(language, 'txt')}"
             yield record
 
 

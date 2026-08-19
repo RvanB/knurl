@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Iterable
 
 import tree_sitter_python
+import tree_sitter_c
+import tree_sitter_cpp
+import tree_sitter_css
+import tree_sitter_go
+import tree_sitter_html
+import tree_sitter_java
+import tree_sitter_javascript
+import tree_sitter_rust
+import tree_sitter_typescript
 from tree_sitter import Language, Parser, Query, QueryCursor
 
 from neural_highlight.dataset.normalize import normalize_capture
 from neural_highlight.labels import Label, label_name
 
-
-PYTHON_LANGUAGE = Language(tree_sitter_python.language())
 
 # The upstream query aims at editor themes and intentionally uses fairly broad
 # captures. These supplemental captures preserve distinctions required by our
@@ -28,9 +36,41 @@ _SUPPLEMENTAL_QUERY = r"""
   "(" ")" "[" "]" "{" "}" "," ":" ";" "."
 ] @punctuation
 """
-PYTHON_QUERY = Query(
-    PYTHON_LANGUAGE, tree_sitter_python.HIGHLIGHTS_QUERY + "\n" + _SUPPLEMENTAL_QUERY
+_TYPESCRIPT_QUERY = (
+    files("tree_sitter_typescript").joinpath("queries/highlights.scm").read_text(encoding="utf-8")
 )
+
+_LANGUAGE_SPECS = {
+    "python": (tree_sitter_python.language, tree_sitter_python.HIGHLIGHTS_QUERY + "\n" + _SUPPLEMENTAL_QUERY),
+    "javascript": (tree_sitter_javascript.language, tree_sitter_javascript.HIGHLIGHTS_QUERY),
+    "typescript": (
+        tree_sitter_typescript.language_typescript,
+        tree_sitter_javascript.HIGHLIGHTS_QUERY + "\n" + _TYPESCRIPT_QUERY,
+    ),
+    "html": (tree_sitter_html.language, tree_sitter_html.HIGHLIGHTS_QUERY),
+    "css": (tree_sitter_css.language, tree_sitter_css.HIGHLIGHTS_QUERY),
+    "rust": (tree_sitter_rust.language, tree_sitter_rust.HIGHLIGHTS_QUERY),
+    "c": (tree_sitter_c.language, tree_sitter_c.HIGHLIGHTS_QUERY),
+    "c++": (
+        tree_sitter_cpp.language,
+        tree_sitter_c.HIGHLIGHTS_QUERY + "\n" + tree_sitter_cpp.HIGHLIGHTS_QUERY,
+    ),
+    "go": (tree_sitter_go.language, tree_sitter_go.HIGHLIGHTS_QUERY),
+    "java": (tree_sitter_java.language, tree_sitter_java.HIGHLIGHTS_QUERY),
+}
+SUPPORTED_LANGUAGES = tuple(_LANGUAGE_SPECS)
+_COMPILED: dict[str, tuple[Language, Query]] = {}
+
+
+def _teacher(language: str) -> tuple[Language, Query]:
+    language = language.lower()
+    if language not in _LANGUAGE_SPECS:
+        raise ValueError(f"unsupported language {language!r}; choose from {', '.join(SUPPORTED_LANGUAGES)}")
+    if language not in _COMPILED:
+        language_factory, query_source = _LANGUAGE_SPECS[language]
+        grammar = Language(language_factory())
+        _COMPILED[language] = grammar, Query(grammar, query_source)
+    return _COMPILED[language]
 
 
 @dataclass(frozen=True)
@@ -52,11 +92,12 @@ class Annotation:
             raise ValueError("source and labels must have identical byte lengths")
 
 
-def annotate_python(source: str | bytes) -> Annotation:
+def annotate(source: str | bytes, language: str) -> Annotation:
     """Parse and annotate a complete source unit, preserving UTF-8 byte offsets."""
     source_bytes = source.encode("utf-8") if isinstance(source, str) else source
-    tree = Parser(PYTHON_LANGUAGE).parse(source_bytes)
-    raw_captures = QueryCursor(PYTHON_QUERY).captures(tree.root_node)
+    grammar, query = _teacher(language)
+    tree = Parser(grammar).parse(source_bytes)
+    raw_captures = QueryCursor(query).captures(tree.root_node)
     labels = bytearray([Label.PLAIN]) * len(source_bytes)
     captures: list[Capture] = []
 
@@ -76,6 +117,11 @@ def annotate_python(source: str | bytes) -> Annotation:
         captures.append(capture)
 
     return Annotation(source_bytes, bytes(labels), tuple(captures))
+
+
+def annotate_python(source: str | bytes) -> Annotation:
+    """Compatibility wrapper for the original Python-only public API."""
+    return annotate(source, "python")
 
 
 def iter_spans(annotation: Annotation) -> Iterable[tuple[int, int, Label, bytes]]:
@@ -120,9 +166,10 @@ def colored(annotation: Annotation) -> str:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="complete Python file to annotate")
+    parser.add_argument("--language", choices=SUPPORTED_LANGUAGES, default="python")
     parser.add_argument("--spans", action="store_true", help="print byte ranges and labels")
     args = parser.parse_args(argv)
-    annotation = annotate_python(args.path.read_bytes())
+    annotation = annotate(args.path.read_bytes(), args.language)
     if args.spans:
         for start, end, label, text in iter_spans(annotation):
             print(f"{start:6}:{end:<6} {label_name(label):20} {text!r}")

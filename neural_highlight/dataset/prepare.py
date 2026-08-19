@@ -8,14 +8,11 @@ from collections import Counter
 from contextlib import ExitStack
 from pathlib import Path
 
-from neural_highlight.dataset.annotate import annotate_python
+from neural_highlight.dataset.annotate import SUPPORTED_LANGUAGES, annotate
 from neural_highlight.dataset.download import stream_stack_smol, stream_stack_smol_xs, take_usable_files
 from neural_highlight.dataset.split import repository_split
 from neural_highlight.dataset.storage import StoredFile, write_record
 from neural_highlight.languages import LANGUAGE_IDS
-
-
-SUPPORTED_LANGUAGES = ("python",)
 
 
 def prepare_dataset(
@@ -42,7 +39,7 @@ def prepare_dataset(
         for raw in records:
             repository = str(raw["repository_name"])
             split = repository_split(repository, seed)
-            annotation = annotate_python(str(raw["content"]))
+            annotation = annotate(str(raw["content"]), language)
             write_record(
                 streams[split],
                 StoredFile(
@@ -76,10 +73,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-files", type=int, default=1000)
     parser.add_argument("--max-bytes", type=int, default=1_000_000)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output", type=Path, default=Path("data/annotated/python"))
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--source", choices=("smol", "smol-xs"), default="smol")
     args = parser.parse_args(argv)
-    print(json.dumps(prepare_dataset(args.output, args.language, args.max_files, args.max_bytes, args.seed, args.source), indent=2))
+    output = args.output or Path("data/annotated") / args.language
+    print(json.dumps(prepare_dataset(output, args.language, args.max_files, args.max_bytes, args.seed, args.source), indent=2))
 
 
 if __name__ == "__main__":

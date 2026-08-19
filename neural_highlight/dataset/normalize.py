@@ -14,6 +14,10 @@ _EXACT = {
     "type.builtin": Label.TYPE,
     "variable.member": Label.PROPERTY,
     "property": Label.PROPERTY,
+    "attribute": Label.PROPERTY,
+    "tag": Label.TYPE,
+    "constructor": Label.TYPE,
+    "type.definition": Label.TYPE,
     "constant.builtin": Label.CONSTANT,
     "boolean": Label.CONSTANT,
 }
@@ -25,12 +29,18 @@ _PREFIXES = (
     ("keyword", Label.KEYWORD),
     ("operator", Label.OPERATOR),
     ("punctuation", Label.PUNCTUATION),
+    ("delimiter", Label.PUNCTUATION),
+    ("bracket", Label.PUNCTUATION),
     ("function", Label.FUNCTION),
     ("method", Label.FUNCTION),
     ("type", Label.TYPE),
     ("constant", Label.CONSTANT),
     ("variable", Label.IDENTIFIER),
     ("identifier", Label.IDENTIFIER),
+    ("label", Label.IDENTIFIER),
+    ("namespace", Label.IDENTIFIER),
+    ("module", Label.IDENTIFIER),
+    ("preproc", Label.KEYWORD),
 )
 
 
@@ -43,4 +53,3 @@ def normalize_capture(capture: str) -> Label:
         if capture == prefix or capture.startswith(prefix + "."):
             return label
     return Label.PLAIN
-

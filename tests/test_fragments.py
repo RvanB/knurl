@@ -67,3 +67,12 @@ def test_synthetic_mixture_has_per_byte_language_switches(tmp_path: Path) -> Non
         valid = sample["region_labels"][sample["region_labels"] != IGNORE_LABEL_ID]
         assert len(torch.unique(valid)) == 2
         assert int(sample["language_id"]) == 0
+
+
+def test_dataset_combines_multiple_split_files(tmp_path: Path) -> None:
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    make_dataset(first)
+    make_dataset(second)
+    dataset = FragmentDataset([first, second], fragment_length=4)
+    assert len(dataset.records) == 4

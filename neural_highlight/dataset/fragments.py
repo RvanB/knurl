@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,7 +44,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
 
     def __init__(
         self,
-        path: str | Path,
+        path: str | Path | Sequence[str | Path],
         fragment_length: int = 256,
         samples_per_epoch: int | None = None,
         targeted_fraction: float = 0.3,
@@ -59,9 +60,11 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             raise ValueError("mixture_fraction must be between zero and one")
         if max_regions < 2:
             raise ValueError("max_regions must be at least two")
-        self.records = tuple(read_records(Path(path)))
+        paths = [Path(path)] if isinstance(path, (str, Path)) else [Path(item) for item in path]
+        self.paths = tuple(paths)
+        self.records = tuple(record for item in paths for record in read_records(item))
         if not self.records:
-            raise ValueError(f"no records found in {path}")
+            raise ValueError(f"no records found in {paths}")
         self.fragment_length = fragment_length
         self.samples_per_epoch = samples_per_epoch or len(self.records)
         self.targeted_fraction = targeted_fraction
@@ -208,7 +211,7 @@ def describe_sample(dataset: FragmentDataset, index: int) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("path", type=Path, help="an annotated split JSONL")
+    parser.add_argument("path", type=Path, nargs="+", help="one or more annotated split JSONLs")
     parser.add_argument("--length", type=int, default=256)
     parser.add_argument("--count", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)

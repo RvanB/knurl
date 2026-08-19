@@ -90,3 +90,23 @@ Optimizer-step telemetry is emitted every 50 batches by default. It includes
 instantaneous/rolling loss, learning rate, gradient norm, throughput, and CUDA
 memory. Change the cadence with `--log-every-steps`; validation and full
 class-aware metrics remain epoch-level.
+
+## Multilingual training
+
+The teacher supports Python, JavaScript, TypeScript, HTML, CSS, Rust, C, C++,
+Go, and Java. Prepare all ten monolingual corpora with one command:
+
+```sh
+uv run python scripts/prepare_multilingual.py --source smol --max-files 5000
+```
+
+Then pass all desired splits to the trainer. The fragment sampler draws across
+the combined record pool and synthesizes abrupt language changes at runtime:
+
+```sh
+uv run python scripts/train_model.py \
+  --train data/annotated/{python,javascript,typescript,html,css,rust,c,c++,go,java}/train.jsonl \
+  --validation data/annotated/{python,javascript,typescript,html,css,rust,c,c++,go,java}/validation.jsonl \
+  --output runs/multilingual-bigru --device cuda --language-embedding \
+  --mixture-fraction 0.25 --max-regions 4 --wandb
+```

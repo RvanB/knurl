@@ -207,8 +207,8 @@ def save_checkpoint(
 
 
 def train(
-    train_path: Path,
-    validation_path: Path,
+    train_path: Path | list[Path],
+    validation_path: Path | list[Path],
     output_dir: Path,
     train_config: TrainConfig,
     model_config: BiGRUConfig,
@@ -250,8 +250,8 @@ def train(
             config={
                 "architecture": "byte-bigru",
                 "parameters": model.parameter_count,
-                "train_path": str(train_path),
-                "validation_path": str(validation_path),
+                "train_path": [str(path) for path in train_path] if isinstance(train_path, list) else str(train_path),
+                "validation_path": [str(path) for path in validation_path] if isinstance(validation_path, list) else str(validation_path),
                 **{f"train/{key}": value for key, value in asdict(train_config).items()},
                 **{f"model/{key}": value for key, value in model_config.to_dict().items()},
             },
@@ -333,8 +333,8 @@ def train(
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--train", type=Path, required=True)
-    parser.add_argument("--validation", type=Path, required=True)
+    parser.add_argument("--train", type=Path, nargs="+", required=True)
+    parser.add_argument("--validation", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, default=Path("runs/bigru"))
     parser.add_argument("--fragment-length", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=32)
