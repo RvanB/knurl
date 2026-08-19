@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from collections.abc import Callable
 
 import torch
 from torch import nn
@@ -30,6 +32,7 @@ class TrainConfig:
     targeted_fraction: float = 0.3
     seed: int = 0
     device: str = "auto"
+    log_every_steps: int = 50
 
 
 @dataclass(frozen=True)
@@ -81,13 +84,21 @@ def run_epoch(
     loader: DataLoader,
     device: torch.device,
     optimizer: AdamW | None = None,
+    step_callback: Callable[[dict[str, float | int]], None] | None = None,
+    log_every_steps: int = 50,
 ) -> dict[str, object]:
+    if log_every_steps <= 0:
+        raise ValueError("log_every_steps must be positive")
     training = optimizer is not None
     model.train(training)
     criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL_ID)
     metrics = ClassificationMetrics(model.config.num_classes)
     total_loss = 0.0
     batches = 0
+    interval_loss = 0.0
+    interval_examples = 0
+    interval_bytes = 0
+    interval_started = time.perf_counter()
     for batch in loader:
         input_ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
@@ -98,11 +109,40 @@ def run_epoch(
             if optimizer is not None:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                gradient_norm = float(nn.utils.clip_grad_norm_(model.parameters(), 1.0))
                 optimizer.step()
         total_loss += float(loss.detach())
         batches += 1
+        interval_loss += float(loss.detach())
+        interval_examples += input_ids.shape[0]
+        interval_bytes += int(batch["attention_mask"].sum())
         metrics.update(logits, labels)
+        if training and step_callback is not None and (
+            batches % log_every_steps == 0 or batches == len(loader)
+        ):
+            elapsed = max(time.perf_counter() - interval_started, 1e-9)
+            step_values: dict[str, float | int] = {
+                "batch": batches,
+                "loss": float(loss.detach()),
+                "rolling_loss": interval_loss / max(1, batches % log_every_steps or log_every_steps),
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                "gradient_norm": gradient_norm,
+                "examples_per_second": interval_examples / elapsed,
+                "bytes_per_second": interval_bytes / elapsed,
+            }
+            if device.type == "cuda":
+                step_values.update(
+                    {
+                        "cuda_allocated_mb": torch.cuda.memory_allocated(device) / 2**20,
+                        "cuda_reserved_mb": torch.cuda.memory_reserved(device) / 2**20,
+                        "cuda_peak_allocated_mb": torch.cuda.max_memory_allocated(device) / 2**20,
+                    }
+                )
+            step_callback(step_values)
+            interval_loss = 0.0
+            interval_examples = 0
+            interval_bytes = 0
+            interval_started = time.perf_counter()
     result = metrics.compute()
     result["loss"] = total_loss / max(1, batches)
     return result
@@ -178,16 +218,47 @@ def train(
             },
         )
         run.define_metric("epoch")
+        run.define_metric("global_step")
         run.define_metric("train/*", step_metric="epoch")
         run.define_metric("validation/*", step_metric="epoch")
-        run.watch(model, log="gradients", log_freq=max(1, len(train_loader)))
+        run.define_metric("train_step/*", step_metric="global_step")
+        run.watch(model, log="gradients", log_freq=max(1, train_config.log_every_steps))
     best_f1 = -1.0
     best_path = output_dir / "best.pt"
+    global_step = 0
+
+    def log_training_step(values: dict[str, float | int]) -> None:
+        nonlocal global_step
+        # The callback fires after an interval, so advance by the actual number
+        # of batches since the last report (the final interval may be shorter).
+        current_batch = int(values["batch"])
+        previous_batch = global_step % len(train_loader)
+        advanced = current_batch - previous_batch
+        if advanced <= 0:
+            advanced = current_batch
+        global_step += advanced
+        payload = {
+            "global_step": global_step,
+            **{f"train_step/{key}": value for key, value in values.items()},
+        }
+        print(json.dumps(payload))
+        if run is not None:
+            run.log(payload, step=global_step)
+
     try:
         for epoch in range(1, train_config.epochs + 1):
             train_data.set_epoch(epoch)
             validation_data.set_epoch(epoch)
-            train_metrics = run_epoch(model, train_loader, device, optimizer)
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+            train_metrics = run_epoch(
+                model,
+                train_loader,
+                device,
+                optimizer,
+                step_callback=log_training_step,
+                log_every_steps=train_config.log_every_steps,
+            )
             with torch.no_grad():
                 validation_metrics = run_epoch(model, validation_loader, device)
             summary = {"epoch": epoch, "train": train_metrics, "validation": validation_metrics}
@@ -205,7 +276,8 @@ def train(
                         "checkpoint/improved": int(improved),
                         **flatten_metrics("train", train_metrics),
                         **flatten_metrics("validation", validation_metrics),
-                    }
+                    },
+                    step=global_step,
                 )
         if run is not None and tracking.log_model:
             run.log_model(path=str(best_path), name=f"{run.id}-best-bigru")
@@ -228,6 +300,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--log-every-steps", type=int, default=50)
     parser.add_argument("--language-embedding", action="store_true")
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--layers", type=int, default=2)
@@ -243,6 +316,7 @@ def main(argv: list[str] | None = None) -> None:
         fragment_length=args.fragment_length, batch_size=args.batch_size,
         train_samples=args.train_samples, validation_samples=args.validation_samples,
         epochs=args.epochs, learning_rate=args.learning_rate, seed=args.seed, device=args.device,
+        log_every_steps=args.log_every_steps,
     )
     model_config = BiGRUConfig(
         hidden_size=args.hidden_size, num_layers=args.layers,

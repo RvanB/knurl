@@ -4,7 +4,7 @@ from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID
 from neural_highlight.infer import highlight
 from neural_highlight.metrics import ClassificationMetrics
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
-from neural_highlight.train import flatten_metrics
+from neural_highlight.train import flatten_metrics, run_epoch
 
 
 def test_bigru_shape_and_language_modes() -> None:
@@ -48,3 +48,21 @@ def test_wandb_metrics_are_flattened() -> None:
     assert flat["validation/loss"] == 1.5
     assert flat["validation/class/keyword/f1"] == 0.34
     assert flat["validation/class/keyword/support"] == 12
+
+
+def test_training_step_callback_reports_optimizer_telemetry() -> None:
+    model = ByteBiGRU(BiGRUConfig(hidden_size=8, num_layers=1))
+    optimizer = torch.optim.AdamW(model.parameters())
+    batch = {
+        "input_ids": torch.tensor([[100, 101, 102, 103]]),
+        "labels": torch.tensor([[1, 2, 2, 0]]),
+        "attention_mask": torch.tensor([[True, True, True, True]]),
+        "language_id": torch.tensor([1]),
+    }
+    reports = []
+    run_epoch(model, [batch, batch], torch.device("cpu"), optimizer, reports.append, 1)
+    assert len(reports) == 2
+    assert reports[0]["batch"] == 1
+    assert reports[0]["loss"] > 0
+    assert reports[0]["gradient_norm"] >= 0
+    assert reports[0]["bytes_per_second"] > 0

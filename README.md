@@ -66,10 +66,16 @@ uv run python scripts/train_model.py \
   --output runs/python-bigru \
   --wandb --wandb-project neural-highlight \
   --wandb-name python-bigru-256 \
-  --wandb-tags python,bigru,context-256
+  --wandb-tags python,bigru,context-256 \
+  --log-every-steps 50
 ```
 
 W&B receives hyperparameters, parameter count, losses, accuracy, macro F1,
 per-class precision/recall/F1/support, gradient statistics, and the best model
 checkpoint. Use `--wandb-mode offline` to test logging without an account, or
 `--no-wandb-model` to keep checkpoints local.
+
+Optimizer-step telemetry is emitted every 50 batches by default. It includes
+instantaneous/rolling loss, learning rate, gradient norm, throughput, and CUDA
+memory. Change the cadence with `--log-every-steps`; validation and full
+class-aware metrics remain epoch-level.
