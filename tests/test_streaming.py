@@ -57,3 +57,22 @@ def test_streaming_wrapped_code_keeps_interior_syntax_labels(tmp_path: Path) -> 
     sample = dataset[0]
     assert sample["input_ids"][0, :2].tolist() == list(b"/*")
     assert sample["labels"][0, 2:8].tolist() == [1] * 6
+
+
+def test_streaming_prose_code_augmentation_labels_prose(tmp_path: Path) -> None:
+    path = tmp_path / "prose.jsonl"
+    prose = b"This function returns the configured value."
+    source = b"/* " + prose + b" */\nreturn value"
+    labels = bytes([0]) * (len(source) - 12) + bytes([1]) * 6 + bytes([0]) + bytes([2]) * 5
+    mask = bytearray([1]) * len(source)
+    mask[3 : 3 + len(prose)] = bytes(len(prose))
+    with path.open("w", encoding="utf-8") as stream:
+        write_record(stream, StoredFile("r", "python", "x.py", source, labels, label_mask=bytes(mask)))
+    sample = StreamingFragmentDataset(
+        path, chunk_length=32, lookahead=8, chunks_per_sample=2,
+        samples_per_epoch=1, delimiter_wrap_fraction=0, prose_code_fraction=1,
+    )[0]
+    inputs = bytes(sample["input_ids"][:, :32].flatten().tolist())
+    targets = sample["labels"].flatten().tolist()
+    assert any(word in inputs for word in (b"function", b"returns", b"configured"))
+    assert targets.count(9) >= 32

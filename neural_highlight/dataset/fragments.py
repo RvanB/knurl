@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 
 from neural_highlight.dataset.annotate import Annotation, colored, iter_spans
 from neural_highlight.dataset.storage import IndexedJsonlStore, StoredFile
+from neural_highlight.dataset.prose import sample_prose
 from neural_highlight.labels import Label, label_name
 from neural_highlight.languages import LANGUAGE_IDS, LANGUAGE_NAMES
 
@@ -53,6 +54,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         mixture_fraction: float = 0.25,
         max_regions: int = 4,
         delimiter_wrap_fraction: float = 0.1,
+        prose_code_fraction: float = 0.15,
     ) -> None:
         if fragment_length <= 0:
             raise ValueError("fragment_length must be positive")
@@ -64,6 +66,8 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             raise ValueError("max_regions must be at least two")
         if not 0.0 <= delimiter_wrap_fraction <= 1.0:
             raise ValueError("delimiter_wrap_fraction must be between zero and one")
+        if not 0.0 <= prose_code_fraction <= 1.0:
+            raise ValueError("prose_code_fraction must be between zero and one")
         paths = [Path(path)] if isinstance(path, (str, Path)) else [Path(item) for item in path]
         self.paths = tuple(paths)
         self.store = IndexedJsonlStore(paths)
@@ -76,6 +80,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         self.mixture_fraction = mixture_fraction
         self.max_regions = max_regions
         self.delimiter_wrap_fraction = delimiter_wrap_fraction
+        self.prose_code_fraction = prose_code_fraction
         # Shared memory keeps persistent DataLoader workers synchronized when
         # the trainer advances to a new epoch.
         self._epoch = torch.zeros((), dtype=torch.long)
@@ -130,6 +135,10 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         if index < 0 or index >= len(self):
             raise IndexError(index)
         rng = self._rng(index)
+        if self.fragment_length >= 32 and rng.random() < self.prose_code_fraction:
+            sample = self._prose_code_sample(rng)
+            if sample is not None:
+                return sample
         if self.fragment_length >= 5 and rng.random() < self.delimiter_wrap_fraction:
             return self._wrapped_code_sample(rng)
         if rng.random() < self.mixture_fraction:
@@ -260,6 +269,37 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             -1,
         )
 
+    def _prose_code_sample(self, rng: random.Random) -> dict[str, Tensor] | None:
+        """Mix labeled prose from comments with genuine syntax-labeled code."""
+        prose = sample_prose(self.store, rng, max(16, self.fragment_length // 2))
+        if prose is None:
+            return None
+        record_index = rng.randrange(len(self.store))
+        record = self.store[record_index]
+        opening, closing = rng.choice(((b"/* ", b" */"), (b"", b"")))
+        separators = b"\n"
+        overhead = len(opening) + len(closing) + len(separators)
+        prose = prose[: max(1, self.fragment_length // 2)]
+        code_length = max(1, self.fragment_length - len(prose) - overhead)
+        start = rng.randrange(max(0, len(record.source) - code_length) + 1)
+        code = record.source[start : start + code_length]
+        code_labels = record.labels[start : start + len(code)]
+        code_regions = self._region_bytes(record, start, len(code))
+        code_mask = (
+            record.label_mask[start : start + len(code)]
+            if record.label_mask is not None else bytes([1]) * len(code)
+        )
+        language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
+        comment = bytes([Label.COMMENT])
+        prefix = opening + prose + separators
+        return self._pack(
+            prefix + code + closing,
+            comment * len(prefix) + code_labels + comment * len(closing),
+            bytes([language_id]) * len(prefix) + code_regions + bytes([language_id]) * len(closing),
+            bytes([1]) * len(prefix) + code_mask + bytes([1]) * len(closing),
+            language_id, record_index, -1,
+        )
+
     def source_for(self, sample: dict[str, Tensor]) -> bytes:
         length = int(sample["source_length"])
         return bytes(sample["input_ids"][:length].tolist())
@@ -307,6 +347,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mixture-fraction", type=float, default=0.25)
     parser.add_argument("--max-regions", type=int, default=4)
     parser.add_argument("--delimiter-wrap-fraction", type=float, default=0.1)
+    parser.add_argument("--prose-code-fraction", type=float, default=0.15)
     args = parser.parse_args(argv)
     dataset = FragmentDataset(
         args.path,
@@ -317,6 +358,7 @@ def main(argv: list[str] | None = None) -> None:
         mixture_fraction=args.mixture_fraction,
         max_regions=args.max_regions,
         delimiter_wrap_fraction=args.delimiter_wrap_fraction,
+        prose_code_fraction=args.prose_code_fraction,
     )
     for index in range(len(dataset)):
         if index:

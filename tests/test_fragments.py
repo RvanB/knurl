@@ -4,6 +4,7 @@ import torch
 
 from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID, FragmentDataset
 from neural_highlight.dataset.storage import StoredFile, write_record
+from neural_highlight.dataset.prose import prose_lines
 from neural_highlight.labels import Label
 
 
@@ -108,3 +109,26 @@ def test_delimiter_wrapping_preserves_code_targets(tmp_path: Path) -> None:
     assert b"return" in source
     start = source.index(b"return")
     assert sample["labels"][start : start + 6].tolist() == [Label.KEYWORD] * 6
+
+
+def test_prose_extraction_and_augmentation_supervise_both_classes(tmp_path: Path) -> None:
+    path = tmp_path / "prose.jsonl"
+    prose = b"This function returns the configured value."
+    source = b"/* " + prose + b" */\nreturn value"
+    labels = bytes([Label.PLAIN]) * len(source)
+    labels = labels[:-12] + bytes([Label.KEYWORD]) * 6 + bytes([Label.PLAIN]) + bytes([Label.IDENTIFIER]) * 5
+    mask = bytearray([1]) * len(source)
+    mask[3 : 3 + len(prose)] = bytes(len(prose))
+    record = StoredFile("r", "python", "x.py", source, labels, label_mask=bytes(mask))
+    assert prose_lines(record) == (prose,)
+    with path.open("w", encoding="utf-8") as stream:
+        write_record(stream, record)
+    sample = FragmentDataset(
+        path, fragment_length=96, samples_per_epoch=1, mixture_fraction=0,
+        delimiter_wrap_fraction=0, prose_code_fraction=1,
+    )[0]
+    rendered = bytes(sample["input_ids"][: int(sample["source_length"])] .tolist())
+    prose_start = rendered.index(prose)
+    code_start = rendered.rindex(b"return")
+    assert sample["labels"][prose_start : prose_start + len(prose)].tolist() == [Label.COMMENT] * len(prose)
+    assert sample["labels"][code_start : code_start + 6].tolist() == [Label.KEYWORD] * 6

@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 
 from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID
 from neural_highlight.dataset.storage import IndexedJsonlStore, StoredFile
+from neural_highlight.dataset.prose import sample_prose
 from neural_highlight.languages import LANGUAGE_IDS
 from neural_highlight.labels import Label
 
@@ -30,6 +31,7 @@ class StreamingFragmentDataset(Dataset[dict[str, Tensor]]):
         seed: int = 0,
         start_at_file_beginning_fraction: float = 0.25,
         delimiter_wrap_fraction: float = 0.1,
+        prose_code_fraction: float = 0.15,
     ) -> None:
         paths = [Path(paths)] if isinstance(paths, (str, Path)) else [Path(path) for path in paths]
         self.store = IndexedJsonlStore(paths)
@@ -44,6 +46,9 @@ class StreamingFragmentDataset(Dataset[dict[str, Tensor]]):
         self.seed = seed
         self.start_at_file_beginning_fraction = start_at_file_beginning_fraction
         self.delimiter_wrap_fraction = delimiter_wrap_fraction
+        if not 0.0 <= prose_code_fraction <= 1.0:
+            raise ValueError("prose_code_fraction must be between zero and one")
+        self.prose_code_fraction = prose_code_fraction
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -64,7 +69,38 @@ class StreamingFragmentDataset(Dataset[dict[str, Tensor]]):
         record = self.store[record_index]
         committed_total = self.chunk_length * self.chunks_per_sample
         language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
-        if rng.random() < self.delimiter_wrap_fraction:
+        prose = (
+            sample_prose(self.store, rng, max(16, committed_total // 2))
+            if rng.random() < self.prose_code_fraction else None
+        )
+        if prose is not None:
+            total_length = committed_total + self.lookahead
+            opening, closing = rng.choice(((b"/* ", b" */"), (b"", b"")))
+            prose = prose[: max(1, committed_total // 2)]
+            prefix = opening + prose + b"\n"
+            code_length = max(1, total_length - len(prefix) - len(closing))
+            payload_start = rng.randrange(max(0, len(record.source) - code_length) + 1)
+            code = record.source[payload_start : payload_start + code_length]
+            original_regions = self._region_labels(record)
+            original_mask = record.label_mask or bytes([1]) * len(record.source)
+            source = prefix + code + closing
+            labels_source = (
+                bytes([Label.COMMENT]) * len(prefix)
+                + record.labels[payload_start : payload_start + len(code)]
+                + bytes([Label.COMMENT]) * len(closing)
+            )
+            regions = (
+                bytes([language_id]) * len(prefix)
+                + original_regions[payload_start : payload_start + len(code)]
+                + bytes([language_id]) * len(closing)
+            )
+            supervision = (
+                bytes([1]) * len(prefix)
+                + original_mask[payload_start : payload_start + len(code)]
+                + bytes([1]) * len(closing)
+            )
+            start = 0
+        elif rng.random() < self.delimiter_wrap_fraction:
             total_length = committed_total + self.lookahead
             payload_length = max(1, total_length - 4)
             payload_start = rng.randrange(max(0, len(record.source) - payload_length) + 1)

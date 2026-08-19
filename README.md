@@ -181,3 +181,11 @@ uv run python scripts/train_model.py \
   --output runs/multilingual-bigru --device cuda --language-embedding \
   --mixture-fraction 0.25 --max-regions 4 --wandb
 ```
+
+Comment bodies in the annotated files are initially masked because delimiters
+alone do not tell us whether their contents are prose or embedded code. During
+training, `--prose-code-fraction` (default `0.15`) conservatively extracts
+natural-language lines from those bodies and mixes them with genuine labeled
+code. The prose receives the `comment` target while the code retains its syntax
+targets; half of these synthetic examples omit comment delimiters. Validation
+does not use this augmentation. Set the fraction to zero to disable it.

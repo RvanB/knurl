@@ -40,6 +40,7 @@ class StreamingTrainConfig:
     log_every_steps: int = 20
     num_workers: int = 2
     delimiter_wrap_fraction: float = 0.1
+    prose_code_fraction: float = 0.15
 
 
 def run_stream_epoch(
@@ -140,11 +141,13 @@ def train_streaming(
         train_paths, config.chunk_length, config.lookahead, config.chunks_per_sample,
         config.train_samples, config.seed,
         delimiter_wrap_fraction=config.delimiter_wrap_fraction,
+        prose_code_fraction=config.prose_code_fraction,
     )
     validation_data = StreamingFragmentDataset(
         validation_paths, config.chunk_length, config.lookahead, config.chunks_per_sample,
         config.validation_samples, config.seed + 1,
         delimiter_wrap_fraction=0.0,
+        prose_code_fraction=0.0,
     )
     loader_kwargs = {
         "batch_size": config.batch_size,
@@ -243,6 +246,7 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--log-every-steps", type=int, default=20)
     parser.add_argument("--delimiter-wrap-fraction", type=float, default=0.1)
+    parser.add_argument("--prose-code-fraction", type=float, default=0.15)
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-name")
     args = parser.parse_args()
@@ -254,6 +258,7 @@ def main() -> None:
         learning_rate=args.learning_rate, num_workers=args.num_workers,
         log_every_steps=args.log_every_steps, device=args.device,
         delimiter_wrap_fraction=args.delimiter_wrap_fraction,
+        prose_code_fraction=args.prose_code_fraction,
     )
     print(train_streaming(
         args.train, args.validation, args.output, config,
