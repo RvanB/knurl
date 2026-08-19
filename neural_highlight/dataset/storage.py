@@ -22,12 +22,15 @@ class StoredFile:
     source: bytes
     labels: bytes
     region_labels: bytes | None = None
+    label_mask: bytes | None = None
 
     def to_json(self) -> str:
         if len(self.source) != len(self.labels):
             raise ValueError("source and labels must have equal lengths")
         if self.region_labels is not None and len(self.source) != len(self.region_labels):
             raise ValueError("source and region labels must have equal lengths")
+        if self.label_mask is not None and len(self.source) != len(self.label_mask):
+            raise ValueError("source and label mask must have equal lengths")
         value = {
                 "repository": self.repository,
                 "language": self.language,
@@ -37,6 +40,8 @@ class StoredFile:
             }
         if self.region_labels is not None:
             value["region_labels_b64"] = base64.b64encode(self.region_labels).decode("ascii")
+        if self.label_mask is not None:
+            value["label_mask_b64"] = base64.b64encode(self.label_mask).decode("ascii")
         return json.dumps(
             value,
             separators=(",", ":"),
@@ -55,6 +60,11 @@ class StoredFile:
             region_labels=(
                 base64.b64decode(value["region_labels_b64"])
                 if "region_labels_b64" in value
+                else None
+            ),
+            label_mask=(
+                base64.b64decode(value["label_mask_b64"])
+                if "label_mask_b64" in value
                 else None
             ),
         )

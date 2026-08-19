@@ -20,7 +20,10 @@ def test_python_snippet_has_one_label_per_byte() -> None:
     assert labels_for(annotation, "café") == {Label.FUNCTION_DEFINITION}
     assert labels_for(annotation, "x") == {Label.PARAMETER}
     assert labels_for(annotation, "(") == {Label.PUNCTUATION}
-    assert labels_for(annotation, "# note") == {Label.COMMENT}
+    assert labels_for(annotation, "#") == {Label.COMMENT}
+    comment_start = annotation.source.index(b"# note")
+    assert annotation.label_mask[comment_start] == 1
+    assert not any(annotation.label_mask[comment_start + 1 : comment_start + 6])
     assert labels_for(annotation, "return") == {Label.KEYWORD}
     assert labels_for(annotation, "value") == {Label.PROPERTY}
 
@@ -47,3 +50,16 @@ def test_empty_source() -> None:
 )
 def test_multilingual_teacher(language: str, source: str, token: str, expected: Label) -> None:
     assert labels_for(annotate(source, language), token) == {expected}
+
+
+def test_block_comment_body_is_unsupervised_but_delimiters_are_kept() -> None:
+    source = "/* fn hidden() { return 1; } prose */\nfn live() {}"
+    annotation = annotate(source, "rust")
+    opening = source.index("/*")
+    closing = source.index("*/")
+    hidden = source.index("fn hidden")
+    live = source.index("fn live")
+    assert annotation.label_mask[opening : opening + 2] == b"\x01\x01"
+    assert annotation.label_mask[closing : closing + 2] == b"\x01\x01"
+    assert not any(annotation.label_mask[hidden : hidden + len("fn hidden")])
+    assert all(annotation.label_mask[live : live + len("fn live")])

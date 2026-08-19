@@ -47,6 +47,7 @@ class TrainConfig:
     prefetch_factor: int = 4
     pin_memory: bool = True
     persistent_workers: bool = True
+    delimiter_wrap_fraction: float = 0.1
 
 
 @dataclass(frozen=True)
@@ -261,12 +262,14 @@ def train(
         train_path, train_config.fragment_length, train_config.train_samples,
         train_config.targeted_fraction, train_config.seed,
         train_config.mixture_fraction, train_config.max_regions,
+        train_config.delimiter_wrap_fraction,
     )
     validation_data = FragmentDataset(
         validation_path, train_config.fragment_length, train_config.validation_samples,
         targeted_fraction=0.0, seed=train_config.seed + 1,
         mixture_fraction=train_config.mixture_fraction,
         max_regions=train_config.max_regions,
+        delimiter_wrap_fraction=0.0,
     )
     generator = torch.Generator().manual_seed(train_config.seed)
     if train_config.num_workers < 0:
@@ -461,6 +464,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-regions", type=int, default=4)
     parser.add_argument("--region-loss-weight", type=float, default=0.2)
     parser.add_argument("--host-hint-dropout", type=float, default=0.5)
+    parser.add_argument("--delimiter-wrap-fraction", type=float, default=0.1)
     parser.add_argument("--language-embedding", action="store_true")
     parser.add_argument("--hidden-size", type=int, default=64)
     parser.add_argument("--layers", type=int, default=2)
@@ -486,6 +490,7 @@ def main(argv: list[str] | None = None) -> None:
         prefetch_factor=args.prefetch_factor,
         pin_memory=not args.no_pin_memory,
         persistent_workers=not args.no_persistent_workers,
+        delimiter_wrap_fraction=args.delimiter_wrap_fraction,
     )
     model_config = BiGRUConfig(
         hidden_size=args.hidden_size, num_layers=args.layers,

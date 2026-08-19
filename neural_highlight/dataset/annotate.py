@@ -86,10 +86,30 @@ class Annotation:
     source: bytes
     labels: bytes
     captures: tuple[Capture, ...]
+    label_mask: bytes | None = None
 
     def __post_init__(self) -> None:
         if len(self.source) != len(self.labels):
             raise ValueError("source and labels must have identical byte lengths")
+        if self.label_mask is not None and len(self.source) != len(self.label_mask):
+            raise ValueError("source and label mask must have identical byte lengths")
+
+
+def _comment_delimiters(source: bytes) -> tuple[int, int]:
+    """Return supervised opening/closing delimiter lengths for a comment capture."""
+    for opening, closing in (
+        (b"<!--", b"-->"),
+        (b"/**", b"*/"),
+        (b"/*!", b"*/"),
+        (b"/*", b"*/"),
+        (b"///", b""),
+        (b"//!", b""),
+        (b"//", b""),
+        (b"#", b""),
+    ):
+        if source.startswith(opening):
+            return len(opening), len(closing) if closing and source.endswith(closing) else 0
+    return 0, 0
 
 
 def annotate(source: str | bytes, language: str) -> Annotation:
@@ -99,6 +119,7 @@ def annotate(source: str | bytes, language: str) -> Annotation:
     tree = Parser(grammar).parse(source_bytes)
     raw_captures = QueryCursor(query).captures(tree.root_node)
     labels = bytearray([Label.PLAIN]) * len(source_bytes)
+    label_mask = bytearray([1]) * len(source_bytes)
     captures: list[Capture] = []
 
     # The API groups nodes by capture name. Apply broader captures first so a
@@ -110,13 +131,29 @@ def annotate(source: str | bytes, language: str) -> Annotation:
     ]
     flattened.sort(key=lambda item: (-(item.end_byte - item.start_byte), item.start_byte))
     for capture in flattened:
+        if capture.label is Label.COMMENT:
+            captured = source_bytes[capture.start_byte : capture.end_byte]
+            opening_length, closing_length = _comment_delimiters(captured)
+            label_mask[capture.start_byte : capture.end_byte] = bytes(
+                capture.end_byte - capture.start_byte
+            )
+            if opening_length:
+                opening_end = capture.start_byte + opening_length
+                label_mask[capture.start_byte : opening_end] = bytes([1]) * opening_length
+                labels[capture.start_byte : opening_end] = bytes([Label.COMMENT]) * opening_length
+            if closing_length:
+                closing_start = capture.end_byte - closing_length
+                label_mask[closing_start : capture.end_byte] = bytes([1]) * closing_length
+                labels[closing_start : capture.end_byte] = bytes([Label.COMMENT]) * closing_length
+            captures.append(capture)
+            continue
         if capture.label is not Label.PLAIN:
             labels[capture.start_byte : capture.end_byte] = bytes([capture.label]) * (
                 capture.end_byte - capture.start_byte
             )
         captures.append(capture)
 
-    return Annotation(source_bytes, bytes(labels), tuple(captures))
+    return Annotation(source_bytes, bytes(labels), tuple(captures), bytes(label_mask))
 
 
 def annotate_python(source: str | bytes) -> Annotation:

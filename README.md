@@ -48,6 +48,16 @@ target and a local language-region target. Mixed samples have an `unknown` host
 hint, allowing a buffer to switch languages without being a valid container
 document. Tune this with `--mixture-fraction` and `--max-regions`.
 
+Real Tree-sitter comment bodies are treated as uncertain supervision: their
+bytes remain visible, but syntax and region losses are masked. Comment
+delimiters remain supervised. Another 10% of samples wrap genuine annotated
+code in comment delimiters while preserving its code labels, preventing `/*`
+or `<!--` from becoming a blanket "everything is a comment" cue. Configure
+this with `--delimiter-wrap-fraction`.
+
+Older annotation files remain readable but retain their opaque-comment targets.
+Regenerate annotations before training models intended to use this policy.
+
 ## Train the first BiGRU
 
 ```sh
@@ -85,6 +95,32 @@ printf 'def hello():\n    return 42\n' | uv run python -m neural_highlight.infer
 
 Omit `--color` to print byte ranges with both predicted local language and
 syntax class, which is useful for debugging classification behavior.
+
+## Train the persistent-state model
+
+The streaming model carries a forward GRU state across committed 256-byte
+chunks and uses 128 bytes of bounded right lookahead. Training backpropagates
+through eight consecutive chunks by default:
+
+```sh
+uv run python scripts/train_streaming_model.py \
+  --train data/annotated/python/train.jsonl data/annotated/rust/train.jsonl \
+  --validation data/annotated/python/validation.jsonl data/annotated/rust/validation.jsonl \
+  --output runs/streaming-gru --device cuda \
+  --chunk-length 256 --lookahead 128 --chunks-per-sample 8 \
+  --batch-size 16 --epochs 0 --early-stopping-patience 3 \
+  --wandb-project neural-highlight --wandb-name streaming-gru
+```
+
+Its inference contract explicitly accepts `state_in` and returns `state_out`,
+making it suitable for ONNX export and editor-side state checkpoints.
+
+Run arbitrarily long stateful inference with checkpoint-derived chunk settings:
+
+```sh
+uv run python -m neural_highlight.stream_infer runs/streaming-gru/best.pt \
+  long-comment.rs --language rust --device cuda --color
+```
 
 ### Watch training with Weights & Biases
 

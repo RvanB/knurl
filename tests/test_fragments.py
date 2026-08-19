@@ -62,7 +62,7 @@ def test_synthetic_mixture_has_per_byte_language_switches(tmp_path: Path) -> Non
     make_dataset(path)
     dataset = FragmentDataset(
         path, fragment_length=6, samples_per_epoch=10,
-        mixture_fraction=1.0, max_regions=2,
+        mixture_fraction=1.0, max_regions=2, delimiter_wrap_fraction=0,
     )
     for sample in dataset:
         valid = sample["region_labels"][sample["region_labels"] != IGNORE_LABEL_ID]
@@ -77,3 +77,34 @@ def test_dataset_combines_multiple_split_files(tmp_path: Path) -> None:
     make_dataset(second)
     dataset = FragmentDataset([first, second], fragment_length=4)
     assert dataset.record_count == 4
+
+
+def test_supervision_mask_becomes_ignored_targets(tmp_path: Path) -> None:
+    path = tmp_path / "masked.jsonl"
+    record = StoredFile(
+        "r", "rust", "x.rs", b"/*code*/", bytes([9]) * 8,
+        label_mask=bytes([1, 1, 0, 0, 0, 0, 1, 1]),
+    )
+    with path.open("w", encoding="utf-8") as stream:
+        write_record(stream, record)
+    sample = FragmentDataset(
+        path, fragment_length=8, samples_per_epoch=1, mixture_fraction=0
+    )[0]
+    assert sample["labels"].tolist() == [9, 9, -100, -100, -100, -100, 9, 9]
+    assert sample["region_labels"].tolist()[2:6] == [-100] * 4
+
+
+def test_delimiter_wrapping_preserves_code_targets(tmp_path: Path) -> None:
+    path = tmp_path / "code.jsonl"
+    record = StoredFile("r", "python", "x.py", b"return value", bytes([1] * 6 + [0] + [2] * 5))
+    with path.open("w", encoding="utf-8") as stream:
+        write_record(stream, record)
+    sample = FragmentDataset(
+        path, fragment_length=16, samples_per_epoch=1,
+        mixture_fraction=0, delimiter_wrap_fraction=1,
+    )[0]
+    source = bytes(sample["input_ids"].tolist())
+    assert source.startswith((b"/*", b"<!--"))
+    assert b"return" in source
+    start = source.index(b"return")
+    assert sample["labels"][start : start + 6].tolist() == [Label.KEYWORD] * 6

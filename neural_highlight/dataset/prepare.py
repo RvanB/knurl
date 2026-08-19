@@ -49,6 +49,7 @@ def prepare_dataset(
                     source=annotation.source,
                     labels=annotation.labels,
                     region_labels=bytes([LANGUAGE_IDS[language]]) * len(annotation.source),
+                    label_mask=annotation.label_mask,
                 ),
             )
             counts[split] += 1

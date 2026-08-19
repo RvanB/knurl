@@ -52,6 +52,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         seed: int = 0,
         mixture_fraction: float = 0.25,
         max_regions: int = 4,
+        delimiter_wrap_fraction: float = 0.1,
     ) -> None:
         if fragment_length <= 0:
             raise ValueError("fragment_length must be positive")
@@ -61,6 +62,8 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             raise ValueError("mixture_fraction must be between zero and one")
         if max_regions < 2:
             raise ValueError("max_regions must be at least two")
+        if not 0.0 <= delimiter_wrap_fraction <= 1.0:
+            raise ValueError("delimiter_wrap_fraction must be between zero and one")
         paths = [Path(path)] if isinstance(path, (str, Path)) else [Path(item) for item in path]
         self.paths = tuple(paths)
         self.store = IndexedJsonlStore(paths)
@@ -72,6 +75,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         self.seed = seed
         self.mixture_fraction = mixture_fraction
         self.max_regions = max_regions
+        self.delimiter_wrap_fraction = delimiter_wrap_fraction
         # Shared memory keeps persistent DataLoader workers synchronized when
         # the trainer advances to a new epoch.
         self._epoch = torch.zeros((), dtype=torch.long)
@@ -111,7 +115,8 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             # Syntax-labeled bytes are common, so this normally succeeds quickly.
             for _ in range(32):
                 center = rng.randrange(len(record.labels))
-                if record.labels[center] != Label.PLAIN:
+                supervised = record.label_mask is None or record.label_mask[center]
+                if supervised and record.labels[center] != Label.PLAIN:
                     jitter = rng.randrange(
                         -self.fragment_length // 4, self.fragment_length // 4 + 1
                     )
@@ -125,6 +130,8 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         if index < 0 or index >= len(self):
             raise IndexError(index)
         rng = self._rng(index)
+        if self.fragment_length >= 5 and rng.random() < self.delimiter_wrap_fraction:
+            return self._wrapped_code_sample(rng)
         if rng.random() < self.mixture_fraction:
             return self._mixed_sample(rng)
         return self._single_sample(rng)
@@ -140,6 +147,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         source: bytes,
         labels: bytes,
         region_labels: bytes,
+        label_mask: bytes,
         host_language_id: int,
         record_index: int,
         start: int,
@@ -152,6 +160,9 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         input_values[:source_length] = np.frombuffer(source, dtype=np.uint8)
         label_values[:source_length] = np.frombuffer(labels, dtype=np.uint8)
         region_values[:source_length] = np.frombuffer(region_labels, dtype=np.uint8)
+        supervision = np.frombuffer(label_mask, dtype=np.uint8).astype(np.bool_)
+        label_values[:source_length][~supervision] = IGNORE_LABEL_ID
+        region_values[:source_length][~supervision] = IGNORE_LABEL_ID
         attention_values[:source_length] = True
         return {
             "input_ids": torch.from_numpy(input_values),
@@ -173,6 +184,11 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
         return self._pack(
             source, labels, self._region_bytes(record, start, len(source)),
+            (
+                record.label_mask[start : start + len(source)]
+                if record.label_mask is not None
+                else bytes([1]) * len(source)
+            ),
             language_id, record_index, start,
         )
 
@@ -183,6 +199,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         sources: list[bytes] = []
         labels: list[bytes] = []
         regions: list[bytes] = []
+        masks: list[bytes] = []
         first_record_index = 0
         previous_language: str | None = None
         for region_index, length in enumerate(lengths):
@@ -201,9 +218,46 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             sources.append(part_source)
             labels.append(record.labels[start : start + length])
             regions.append(self._region_bytes(record, start, len(part_source)))
+            masks.append(
+                record.label_mask[start : start + len(part_source)]
+                if record.label_mask is not None
+                else bytes([1]) * len(part_source)
+            )
         return self._pack(
-            b"".join(sources), b"".join(labels), b"".join(regions),
+            b"".join(sources), b"".join(labels), b"".join(regions), b"".join(masks),
             LANGUAGE_IDS["unknown"], first_record_index, -1,
+        )
+
+    def _wrapped_code_sample(self, rng: random.Random) -> dict[str, Tensor]:
+        """Wrap genuine code in comment markers without erasing its syntax labels."""
+        record_index = rng.randrange(len(self.store))
+        record = self.store[record_index]
+        delimiter_pairs = [
+            pair for pair in ((b"/*", b"*/"), (b"<!--", b"-->"))
+            if len(pair[0]) + len(pair[1]) < self.fragment_length
+        ]
+        opening, closing = rng.choice(delimiter_pairs)
+        payload_length = self.fragment_length - len(opening) - len(closing)
+        largest_start = max(0, len(record.source) - payload_length)
+        start = rng.randrange(largest_start + 1)
+        payload = record.source[start : start + payload_length]
+        payload_labels = record.labels[start : start + len(payload)]
+        payload_regions = self._region_bytes(record, start, len(payload))
+        payload_mask = (
+            record.label_mask[start : start + len(payload)]
+            if record.label_mask is not None
+            else bytes([1]) * len(payload)
+        )
+        language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
+        delimiter_labels = bytes([Label.COMMENT])
+        return self._pack(
+            opening + payload + closing,
+            delimiter_labels * len(opening) + payload_labels + delimiter_labels * len(closing),
+            bytes([language_id]) * len(opening) + payload_regions + bytes([language_id]) * len(closing),
+            bytes([1]) * len(opening) + payload_mask + bytes([1]) * len(closing),
+            language_id,
+            record_index,
+            -1,
         )
 
     def source_for(self, sample: dict[str, Tensor]) -> bytes:
@@ -215,8 +269,12 @@ def describe_sample(dataset: FragmentDataset, index: int) -> str:
     sample = dataset[index]
     length = int(sample["source_length"])
     source = dataset.source_for(sample)
-    labels = bytes(sample["labels"][:length].tolist())
-    region_labels = sample["region_labels"][:length].tolist()
+    raw_labels = sample["labels"][:length].tolist()
+    labels = bytes(Label.PLAIN if value == IGNORE_LABEL_ID else value for value in raw_labels)
+    region_labels = [
+        LANGUAGE_IDS["unknown"] if value == IGNORE_LABEL_ID else value
+        for value in sample["region_labels"][:length].tolist()
+    ]
     annotation = Annotation(source, labels, ())
     record = dataset.record_at(int(sample["file_index"]))
     transitions = []
@@ -248,6 +306,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--targeted-fraction", type=float, default=0.3)
     parser.add_argument("--mixture-fraction", type=float, default=0.25)
     parser.add_argument("--max-regions", type=int, default=4)
+    parser.add_argument("--delimiter-wrap-fraction", type=float, default=0.1)
     args = parser.parse_args(argv)
     dataset = FragmentDataset(
         args.path,
@@ -257,6 +316,7 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         mixture_fraction=args.mixture_fraction,
         max_regions=args.max_regions,
+        delimiter_wrap_fraction=args.delimiter_wrap_fraction,
     )
     for index in range(len(dataset)):
         if index:
