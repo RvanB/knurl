@@ -41,6 +41,7 @@ def test_sampling_is_deterministic_per_epoch(tmp_path: Path) -> None:
     path = tmp_path / "train.jsonl"
     make_dataset(path)
     dataset = FragmentDataset(path, fragment_length=5, samples_per_epoch=20, seed=9)
+    assert dataset.epoch_is_shared == dataset._epoch.is_shared()
     first = [dataset[index]["input_ids"].tolist() for index in range(len(dataset))]
     assert first == [dataset[index]["input_ids"].tolist() for index in range(len(dataset))]
     dataset.set_epoch(1)

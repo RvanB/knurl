@@ -94,6 +94,13 @@ checkpoint, `after-best.pt` is the first epoch after that improvement, and
 `last.pt` is the final completed epoch. A positive `--epochs` remains available
 as a safety cap.
 
+CUDA training defaults to four DataLoader workers, four prefetched batches per
+worker, pinned host memory, persistent workers, and non-blocking device copies.
+Tune the input pipeline with `--num-workers` and `--prefetch-factor`; use
+`--no-pin-memory` or `--no-persistent-workers` only for troubleshooting. The
+dataset epoch counter is shared so persistent workers still generate new crops
+each epoch.
+
 Optimizer-step telemetry is emitted every 50 batches by default. It includes
 instantaneous/rolling loss, learning rate, gradient norm, throughput, and CUDA
 memory. Change the cadence with `--log-every-steps`; validation and full

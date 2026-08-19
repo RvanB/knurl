@@ -43,6 +43,10 @@ class TrainConfig:
     early_stopping_patience: int = 3
     early_stopping_metric: str = "accuracy"
     early_stopping_min_delta: float = 0.0
+    num_workers: int = 4
+    prefetch_factor: int = 4
+    pin_memory: bool = True
+    persistent_workers: bool = True
 
 
 @dataclass(frozen=True)
@@ -156,10 +160,11 @@ def run_epoch(
     interval_bytes = 0
     interval_started = time.perf_counter()
     for batch in loader:
-        input_ids = batch["input_ids"].to(device)
-        labels = batch["labels"].to(device)
-        region_labels = batch["region_labels"].to(device)
-        language_id = batch["language_id"].to(device)
+        non_blocking = device.type == "cuda"
+        input_ids = batch["input_ids"].to(device, non_blocking=non_blocking)
+        labels = batch["labels"].to(device, non_blocking=non_blocking)
+        region_labels = batch["region_labels"].to(device, non_blocking=non_blocking)
+        language_id = batch["language_id"].to(device, non_blocking=non_blocking)
         if training and host_hint_dropout > 0:
             dropped = torch.rand(language_id.shape, device=device) < host_hint_dropout
             language_id = language_id.masked_fill(dropped, 0)
@@ -264,12 +269,43 @@ def train(
         max_regions=train_config.max_regions,
     )
     generator = torch.Generator().manual_seed(train_config.seed)
-    train_loader = DataLoader(train_data, batch_size=train_config.batch_size, shuffle=True, generator=generator)
-    validation_loader = DataLoader(validation_data, batch_size=train_config.batch_size)
+    if train_config.num_workers < 0:
+        raise ValueError("num_workers cannot be negative")
+    if train_config.prefetch_factor <= 0:
+        raise ValueError("prefetch_factor must be positive")
+    loader_options: dict[str, object] = {
+        "batch_size": train_config.batch_size,
+        "num_workers": train_config.num_workers,
+        "pin_memory": train_config.pin_memory and device.type == "cuda",
+    }
+    if train_config.num_workers > 0:
+        persistent_workers = (
+            train_config.persistent_workers
+            and train_data.epoch_is_shared
+            and validation_data.epoch_is_shared
+        )
+        loader_options.update(
+            {
+                "prefetch_factor": train_config.prefetch_factor,
+                "persistent_workers": persistent_workers,
+            }
+        )
+    train_loader = DataLoader(train_data, shuffle=True, generator=generator, **loader_options)
+    validation_loader = DataLoader(validation_data, shuffle=False, **loader_options)
     model = ByteBiGRU(model_config).to(device)
     optimizer = AdamW(model.parameters(), lr=train_config.learning_rate, weight_decay=train_config.weight_decay)
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(json.dumps({"device": str(device), "parameters": model.parameter_count}))
+    print(json.dumps({
+        "device": str(device),
+        "parameters": model.parameter_count,
+        "dataloader": {
+            "num_workers": train_config.num_workers,
+            "prefetch_factor": train_config.prefetch_factor if train_config.num_workers else None,
+            "pin_memory": bool(loader_options["pin_memory"]),
+            "persistent_workers": bool(loader_options.get("persistent_workers", False)),
+            "persistent_workers_requested": train_config.persistent_workers,
+        },
+    }))
     tracking = wandb_config or WandbConfig()
     run = None
     if tracking.enabled:
@@ -413,6 +449,10 @@ def main(argv: list[str] | None = None) -> None:
         "--early-stopping-metric", choices=("accuracy", "macro_f1"), default="accuracy"
     )
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--prefetch-factor", type=int, default=4)
+    parser.add_argument("--no-pin-memory", action="store_true")
+    parser.add_argument("--no-persistent-workers", action="store_true")
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
@@ -442,6 +482,10 @@ def main(argv: list[str] | None = None) -> None:
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_metric=args.early_stopping_metric,
         early_stopping_min_delta=args.early_stopping_min_delta,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        pin_memory=not args.no_pin_memory,
+        persistent_workers=not args.no_persistent_workers,
     )
     model_config = BiGRUConfig(
         hidden_size=args.hidden_size, num_layers=args.layers,

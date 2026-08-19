@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -71,7 +72,16 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         self.seed = seed
         self.mixture_fraction = mixture_fraction
         self.max_regions = max_regions
-        self.epoch = 0
+        # Shared memory keeps persistent DataLoader workers synchronized when
+        # the trainer advances to a new epoch.
+        self._epoch = torch.zeros((), dtype=torch.long)
+        try:
+            self._epoch.share_memory_()
+            self.epoch_is_shared = True
+        except RuntimeError:
+            # Restricted environments may block torch_shm_manager. The trainer
+            # detects this and restarts workers each epoch instead.
+            self.epoch_is_shared = False
         self._interesting = tuple(
             tuple(index for index, label in enumerate(record.labels) if label != Label.PLAIN)
             for record in self.records
@@ -81,10 +91,10 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         return self.samples_per_epoch
 
     def set_epoch(self, epoch: int) -> None:
-        self.epoch = epoch
+        self._epoch.fill_(epoch)
 
     def _rng(self, index: int) -> random.Random:
-        return random.Random((self.seed << 64) ^ (self.epoch << 32) ^ index)
+        return random.Random((self.seed << 64) ^ (int(self._epoch) << 32) ^ index)
 
     def _crop_start(self, record_index: int, rng: random.Random) -> int:
         record = self.records[record_index]
@@ -120,14 +130,19 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         start: int,
     ) -> dict[str, Tensor]:
         source_length = len(source)
-        padding = self.fragment_length - source_length
+        input_values = np.full(self.fragment_length, PAD_BYTE_ID, dtype=np.int64)
+        label_values = np.full(self.fragment_length, IGNORE_LABEL_ID, dtype=np.int64)
+        region_values = np.full(self.fragment_length, IGNORE_LABEL_ID, dtype=np.int64)
+        attention_values = np.zeros(self.fragment_length, dtype=np.bool_)
+        input_values[:source_length] = np.frombuffer(source, dtype=np.uint8)
+        label_values[:source_length] = np.frombuffer(labels, dtype=np.uint8)
+        region_values[:source_length] = np.frombuffer(region_labels, dtype=np.uint8)
+        attention_values[:source_length] = True
         return {
-            "input_ids": torch.tensor(list(source) + [PAD_BYTE_ID] * padding, dtype=torch.long),
-            "labels": torch.tensor(list(labels) + [IGNORE_LABEL_ID] * padding, dtype=torch.long),
-            "region_labels": torch.tensor(
-                list(region_labels) + [IGNORE_LABEL_ID] * padding, dtype=torch.long
-            ),
-            "attention_mask": torch.tensor([True] * source_length + [False] * padding),
+            "input_ids": torch.from_numpy(input_values),
+            "labels": torch.from_numpy(label_values),
+            "region_labels": torch.from_numpy(region_values),
+            "attention_mask": torch.from_numpy(attention_values),
             "language_id": torch.tensor(host_language_id, dtype=torch.long),
             "source_length": torch.tensor(source_length, dtype=torch.long),
             "file_index": torch.tensor(record_index, dtype=torch.long),
