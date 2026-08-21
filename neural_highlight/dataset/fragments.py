@@ -16,6 +16,10 @@ from torch.utils.data import Dataset
 from neural_highlight.dataset.annotate import Annotation, colored, iter_spans
 from neural_highlight.dataset.storage import IndexedJsonlStore, StoredFile
 from neural_highlight.dataset.prose import sample_prose
+from neural_highlight.dataset.comment_wrapping import (
+    random_comment_wrapper_style,
+    wrap_code_as_comment,
+)
 from neural_highlight.labels import Label, label_name
 from neural_highlight.languages import LANGUAGE_IDS, LANGUAGE_NAMES
 
@@ -73,6 +77,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         self.store = IndexedJsonlStore(paths)
         if not len(self.store):
             raise ValueError(f"no records found in {paths}")
+        self.store.require_current_label_schema()
         self.fragment_length = fragment_length
         self.samples_per_epoch = samples_per_epoch or len(self.store)
         self.targeted_fraction = targeted_fraction
@@ -131,6 +136,11 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
                     )
         return rng.randrange(largest_start + 1)
 
+    def _random_record_index(self, rng: random.Random) -> int:
+        language = self._languages[0] if len(self._languages) == 1 else rng.choice(self._languages)
+        indices = self._indices_by_language[language]
+        return indices[0] if len(indices) == 1 else rng.choice(indices)
+
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         if index < 0 or index >= len(self):
             raise IndexError(index)
@@ -185,7 +195,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         }
 
     def _single_sample(self, rng: random.Random) -> dict[str, Tensor]:
-        record_index = rng.randrange(len(self.store))
+        record_index = self._random_record_index(rng)
         record = self.store[record_index]
         start = self._crop_start(record, rng)
         source = record.source[start : start + self.fragment_length]
@@ -239,14 +249,9 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
 
     def _wrapped_code_sample(self, rng: random.Random) -> dict[str, Tensor]:
         """Wrap genuine code in comment markers without erasing its syntax labels."""
-        record_index = rng.randrange(len(self.store))
+        record_index = self._random_record_index(rng)
         record = self.store[record_index]
-        delimiter_pairs = [
-            pair for pair in ((b"/*", b"*/"), (b"<!--", b"-->"))
-            if len(pair[0]) + len(pair[1]) < self.fragment_length
-        ]
-        opening, closing = rng.choice(delimiter_pairs)
-        payload_length = self.fragment_length - len(opening) - len(closing)
+        payload_length = self.fragment_length
         largest_start = max(0, len(record.source) - payload_length)
         start = rng.randrange(largest_start + 1)
         payload = record.source[start : start + payload_length]
@@ -258,12 +263,12 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
             else bytes([1]) * len(payload)
         )
         language_id = LANGUAGE_IDS.get(record.language.lower(), LANGUAGE_IDS["unknown"])
-        delimiter_labels = bytes([Label.COMMENT])
+        wrapped = wrap_code_as_comment(
+            payload, payload_labels, payload_regions, payload_mask, self.fragment_length,
+            style=random_comment_wrapper_style(record.language, rng),
+        )
         return self._pack(
-            opening + payload + closing,
-            delimiter_labels * len(opening) + payload_labels + delimiter_labels * len(closing),
-            bytes([language_id]) * len(opening) + payload_regions + bytes([language_id]) * len(closing),
-            bytes([1]) * len(opening) + payload_mask + bytes([1]) * len(closing),
+            wrapped.source, wrapped.labels, wrapped.regions, wrapped.mask,
             language_id,
             record_index,
             -1,
@@ -274,7 +279,7 @@ class FragmentDataset(Dataset[dict[str, Tensor]]):
         prose = sample_prose(self.store, rng, max(16, self.fragment_length // 2))
         if prose is None:
             return None
-        record_index = rng.randrange(len(self.store))
+        record_index = self._random_record_index(rng)
         record = self.store[record_index]
         opening, closing = rng.choice(((b"/* ", b" */"), (b"", b"")))
         separators = b"\n"

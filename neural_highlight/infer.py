@@ -10,13 +10,25 @@ import torch
 
 from neural_highlight.dataset.fragments import LANGUAGE_IDS
 from neural_highlight.dataset.annotate import Annotation, colored
-from neural_highlight.labels import Label, label_name
-from neural_highlight.languages import LANGUAGE_NAMES
+from neural_highlight.labels import LABEL_SCHEMA_VERSION, Label, label_name
+from neural_highlight.languages import LANGUAGE_NAMES, LANGUAGE_SCHEMA_VERSION
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
 
 
 def load_model(path: Path, device: torch.device) -> ByteBiGRU:
     checkpoint = torch.load(path, map_location=device, weights_only=True)
+    checkpoint_schema = checkpoint.get("label_schema_version", 1)
+    if checkpoint_schema != LABEL_SCHEMA_VERSION:
+        raise ValueError(
+            f"checkpoint uses label schema {checkpoint_schema}, expected "
+            f"{LABEL_SCHEMA_VERSION}; retrain with the current label vocabulary"
+        )
+    language_schema = checkpoint.get("language_schema_version", 1)
+    if language_schema != LANGUAGE_SCHEMA_VERSION:
+        raise ValueError(
+            f"checkpoint uses language schema {language_schema}, expected "
+            f"{LANGUAGE_SCHEMA_VERSION}; retrain with the current language vocabulary"
+        )
     model = ByteBiGRU(BiGRUConfig(**checkpoint["model_config"]))
     model.load_state_dict(checkpoint["model_state"])
     return model.to(device).eval()

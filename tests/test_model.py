@@ -1,5 +1,7 @@
 import torch
 
+from neural_highlight.labels import LABEL_NAMES, LABEL_SCHEMA_VERSION
+from neural_highlight.languages import LANGUAGE_SCHEMA_VERSION
 from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID
 from neural_highlight.infer import analyze, highlight, main
 from neural_highlight.metrics import ClassificationMetrics
@@ -12,12 +14,12 @@ def test_bigru_shape_and_language_modes() -> None:
     languages = torch.tensor([1, 0])
     for use_language in (False, True):
         model = ByteBiGRU(BiGRUConfig(hidden_size=8, num_layers=1, use_language_embedding=use_language))
-        assert model(inputs, languages).shape == (2, 4, 14)
+        assert model(inputs, languages).shape == (2, 4, len(LABEL_NAMES))
         assert model.parameter_count > 0
 
 
 def test_metrics_ignore_padding_and_are_exact() -> None:
-    logits = torch.zeros(1, 3, 14)
+    logits = torch.zeros(1, 3, len(LABEL_NAMES))
     logits[0, 0, 1] = 1
     logits[0, 1, 2] = 1
     targets = torch.tensor([[1, 2, IGNORE_LABEL_ID]])
@@ -88,7 +90,12 @@ def test_inference_cli_accepts_inline_colored_text(tmp_path, capsys) -> None:
         model.classifier.bias[1] = 1
     checkpoint = tmp_path / "model.pt"
     torch.save(
-        {"model_config": model.config.to_dict(), "model_state": model.state_dict()},
+        {
+            "label_schema_version": LABEL_SCHEMA_VERSION,
+            "language_schema_version": LANGUAGE_SCHEMA_VERSION,
+            "model_config": model.config.to_dict(),
+            "model_state": model.state_dict(),
+        },
         checkpoint,
     )
     main([str(checkpoint), "--text", "return 42", "--color"])

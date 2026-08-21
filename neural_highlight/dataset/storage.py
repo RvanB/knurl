@@ -10,8 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, TextIO
 
+from neural_highlight.labels import LABEL_SCHEMA_VERSION
+
 
 _LANGUAGE_FIELD = re.compile(br'"language":"([^"]+)"')
+_LABEL_SCHEMA_FIELD = re.compile(br'"label_schema_version":(\d+)')
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,7 @@ class StoredFile:
     labels: bytes
     region_labels: bytes | None = None
     label_mask: bytes | None = None
+    label_schema_version: int = LABEL_SCHEMA_VERSION
 
     def to_json(self) -> str:
         if len(self.source) != len(self.labels):
@@ -32,12 +36,13 @@ class StoredFile:
         if self.label_mask is not None and len(self.source) != len(self.label_mask):
             raise ValueError("source and label mask must have equal lengths")
         value = {
-                "repository": self.repository,
-                "language": self.language,
-                "path": self.path,
-                "source_b64": base64.b64encode(self.source).decode("ascii"),
-                "labels_b64": base64.b64encode(self.labels).decode("ascii"),
-            }
+            "repository": self.repository,
+            "language": self.language,
+            "path": self.path,
+            "label_schema_version": self.label_schema_version,
+            "source_b64": base64.b64encode(self.source).decode("ascii"),
+            "labels_b64": base64.b64encode(self.labels).decode("ascii"),
+        }
         if self.region_labels is not None:
             value["region_labels_b64"] = base64.b64encode(self.region_labels).decode("ascii")
         if self.label_mask is not None:
@@ -67,6 +72,7 @@ class StoredFile:
                 if "label_mask_b64" in value
                 else None
             ),
+            label_schema_version=value.get("label_schema_version", 1),
         )
 
 
@@ -87,6 +93,7 @@ class RecordRef:
     offset: int
     length: int
     language: str
+    label_schema_version: int
 
 
 class IndexedJsonlStore:
@@ -109,7 +116,10 @@ class IndexedJsonlStore:
                         raise ValueError(f"record at {path}:{offset} has no language field")
                     refs.append(
                         RecordRef(
-                            file_index, offset, len(line), match.group(1).decode("utf-8")
+                            file_index, offset, len(line), match.group(1).decode("utf-8"),
+                            int(schema.group(1)) if (
+                                schema := _LABEL_SCHEMA_FIELD.search(line[:2048])
+                            ) else 1,
                         )
                     )
         self.refs = tuple(refs)
@@ -121,6 +131,18 @@ class IndexedJsonlStore:
 
     def language(self, index: int) -> str:
         return self.refs[index].language
+
+    @property
+    def label_schema_versions(self) -> frozenset[int]:
+        return frozenset(ref.label_schema_version for ref in self.refs)
+
+    def require_current_label_schema(self) -> None:
+        if self.label_schema_versions != frozenset((LABEL_SCHEMA_VERSION,)):
+            found = ", ".join(map(str, sorted(self.label_schema_versions)))
+            raise ValueError(
+                f"dataset uses label schema {found or 'unknown'}, expected "
+                f"{LABEL_SCHEMA_VERSION}; regenerate the annotated dataset"
+            )
 
     def __getitem__(self, index: int) -> StoredFile:
         ref = self.refs[index]

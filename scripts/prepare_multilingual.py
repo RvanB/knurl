@@ -8,6 +8,7 @@ from pathlib import Path
 
 from neural_highlight.dataset.annotate import SUPPORTED_LANGUAGES
 from neural_highlight.dataset.prepare import prepare_dataset
+from neural_highlight.dataset.download import SMOL_XS_ONLY_LANGUAGES
 
 
 def main() -> None:
@@ -21,14 +22,16 @@ def main() -> None:
     args = parser.parse_args()
     manifests = {}
     for language in args.languages:
-        print(f"Preparing {language}...", flush=True)
+        source = "smol-xs" if args.source == "smol" and language in SMOL_XS_ONLY_LANGUAGES else args.source
+        suffix = " (Smol-XS fallback)" if source != args.source else ""
+        print(f"Preparing {language}{suffix}...", flush=True)
         manifests[language] = prepare_dataset(
             args.output_root / language,
             language,
             args.max_files,
             args.max_bytes,
             args.seed,
-            args.source,
+            source,
         )
     print(json.dumps(manifests, indent=2))
 

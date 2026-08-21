@@ -8,7 +8,7 @@ from collections import Counter
 from contextlib import ExitStack
 from pathlib import Path
 
-from neural_highlight.dataset.annotate import SUPPORTED_LANGUAGES, annotate, sanitize_comment_code
+from neural_highlight.dataset.annotate import SUPPORTED_LANGUAGES, annotate, replace_comment_bodies
 from neural_highlight.dataset.download import stream_stack_smol, stream_stack_smol_xs, take_usable_files
 from neural_highlight.dataset.split import repository_split
 from neural_highlight.dataset.storage import StoredFile, write_record
@@ -39,8 +39,8 @@ def prepare_dataset(
         for raw in records:
             repository = str(raw["repository_name"])
             split = repository_split(repository, seed)
-            sanitized = sanitize_comment_code(str(raw["content"]), language)
-            annotation = annotate(sanitized, language, supervise_comment_bodies=True)
+            generated_comments = replace_comment_bodies(str(raw["content"]), language)
+            annotation = annotate(generated_comments, language, supervise_comment_bodies=True)
             write_record(
                 streams[split],
                 StoredFile(

@@ -20,7 +20,8 @@ from torch.utils.data import DataLoader
 from neural_highlight.dataset.fragments import FragmentDataset, IGNORE_LABEL_ID
 from neural_highlight.metrics import ClassificationMetrics
 from neural_highlight.models.bigru import BiGRUConfig, ByteBiGRU
-from neural_highlight.languages import LANGUAGE_NAMES
+from neural_highlight.languages import LANGUAGE_NAMES, LANGUAGE_SCHEMA_VERSION
+from neural_highlight.labels import LABEL_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -236,6 +237,8 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
+            "label_schema_version": LABEL_SCHEMA_VERSION,
+            "language_schema_version": LANGUAGE_SCHEMA_VERSION,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "model_config": model.config.to_dict(),

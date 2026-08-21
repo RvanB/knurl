@@ -1,7 +1,9 @@
 from pathlib import Path
 
 import torch
+import pytest
 
+from neural_highlight.dataset.comment_wrapping import wrap_code_as_comment
 from neural_highlight.dataset.fragments import IGNORE_LABEL_ID, PAD_BYTE_ID, FragmentDataset
 from neural_highlight.dataset.storage import StoredFile, write_record
 from neural_highlight.dataset.prose import prose_lines
@@ -10,7 +12,10 @@ from neural_highlight.labels import Label
 
 def make_dataset(path: Path) -> None:
     records = [
-        StoredFile("r1", "python", "short.py", b"x=1", bytes([2, 11, 10])),
+        StoredFile(
+            "r1", "python", "short.py", b"x=1",
+            bytes([Label.IDENTIFIER, Label.OPERATOR, Label.NUMBER]),
+        ),
         StoredFile(
             "r2",
             "javascript",
@@ -83,7 +88,7 @@ def test_dataset_combines_multiple_split_files(tmp_path: Path) -> None:
 def test_supervision_mask_becomes_ignored_targets(tmp_path: Path) -> None:
     path = tmp_path / "masked.jsonl"
     record = StoredFile(
-        "r", "rust", "x.rs", b"/*code*/", bytes([9]) * 8,
+        "r", "rust", "x.rs", b"/*code*/", bytes([Label.COMMENT]) * 8,
         label_mask=bytes([1, 1, 0, 0, 0, 0, 1, 1]),
     )
     with path.open("w", encoding="utf-8") as stream:
@@ -91,13 +96,16 @@ def test_supervision_mask_becomes_ignored_targets(tmp_path: Path) -> None:
     sample = FragmentDataset(
         path, fragment_length=8, samples_per_epoch=1, mixture_fraction=0
     )[0]
-    assert sample["labels"].tolist() == [9, 9, -100, -100, -100, -100, 9, 9]
+    assert sample["labels"].tolist() == [
+        Label.COMMENT, Label.COMMENT, -100, -100, -100, -100,
+        Label.COMMENT, Label.COMMENT,
+    ]
     assert sample["region_labels"].tolist()[2:6] == [-100] * 4
 
 
 def test_delimiter_wrapping_preserves_code_targets(tmp_path: Path) -> None:
     path = tmp_path / "code.jsonl"
-    record = StoredFile("r", "python", "x.py", b"return value", bytes([1] * 6 + [0] + [2] * 5))
+    record = StoredFile("r", "java", "X.java", b"return value", bytes([1] * 6 + [0] + [2] * 5))
     with path.open("w", encoding="utf-8") as stream:
         write_record(stream, record)
     sample = FragmentDataset(
@@ -105,10 +113,45 @@ def test_delimiter_wrapping_preserves_code_targets(tmp_path: Path) -> None:
         mixture_fraction=0, delimiter_wrap_fraction=1,
     )[0]
     source = bytes(sample["input_ids"].tolist())
-    assert source.startswith((b"/*", b"<!--"))
     assert b"return" in source
     start = source.index(b"return")
     assert sample["labels"][start : start + 6].tolist() == [Label.KEYWORD] * 6
+
+
+@pytest.mark.parametrize(
+    ("style", "opening", "line_prefix", "closing"),
+    (
+        ("c_multiline", b"/*\n", b"", b"\n*/"),
+        ("c_starred", b"/*\n * ", b" * ", b"\n */"),
+        ("html_multiline", b"<!--\n", b"", b"\n-->"),
+        ("slash_lines", b"// ", b"// ", b""),
+        ("hash_lines", b"# ", b"# ", b""),
+    ),
+)
+def test_multiline_comment_wrappers_preserve_code_labels(
+    style: str, opening: bytes, line_prefix: bytes, closing: bytes,
+) -> None:
+    source = b"int x = 1;\nreturn x;"
+    labels = bytes(range(len(source)))
+    regions = bytes([11]) * len(source)
+    wrapped = wrap_code_as_comment(
+        source, labels, regions, bytes([1]) * len(source), 128, style=style,
+    )
+
+    assert wrapped.source.startswith(opening)
+    assert wrapped.source.endswith(closing)
+    if line_prefix:
+        assert b"\n" + line_prefix + b"return" in wrapped.source
+    first, second = source.splitlines(keepends=True)
+    first_start = wrapped.source.index(first)
+    second_start = wrapped.source.index(second)
+    assert wrapped.labels[first_start : first_start + len(first)] == labels[: len(first)]
+    assert wrapped.labels[second_start : second_start + len(second)] == labels[len(first) :]
+    decoration_positions = [
+        index for index, label in enumerate(wrapped.labels) if label == Label.COMMENT
+    ]
+    assert decoration_positions
+    assert all(wrapped.mask[index] for index in decoration_positions)
 
 
 def test_prose_extraction_and_augmentation_supervise_both_classes(tmp_path: Path) -> None:

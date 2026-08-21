@@ -18,6 +18,9 @@ LANGUAGE_NAMES = (
     "go",
     "java",
     "markdown",
+    "ruby",
+    "lua",
+    "glsl",
 )
 LANGUAGE_IDS = {name: index for index, name in enumerate(LANGUAGE_NAMES)}
-
+LANGUAGE_SCHEMA_VERSION = 2

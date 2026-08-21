@@ -10,13 +10,19 @@ from neural_highlight.labels import LABEL_NAMES
 
 
 class ClassificationMetrics:
-    def __init__(self, num_classes: int = len(LABEL_NAMES), class_names: tuple[str, ...] = LABEL_NAMES) -> None:
+    def __init__(
+        self, num_classes: int = len(LABEL_NAMES), class_names: tuple[str, ...] | None = LABEL_NAMES
+    ) -> None:
         self.num_classes = num_classes
-        self.class_names = class_names
+        self.class_names = class_names or LABEL_NAMES
         self.confusion = torch.zeros((num_classes, num_classes), dtype=torch.long)
 
     def update(self, logits: Tensor, targets: Tensor) -> None:
         predictions = logits.argmax(dim=-1).detach().cpu().reshape(-1)
+        self.update_predictions(predictions, targets)
+
+    def update_predictions(self, predictions: Tensor, targets: Tensor) -> None:
+        predictions = predictions.detach().cpu().reshape(-1)
         targets = targets.detach().cpu().reshape(-1)
         valid = targets != IGNORE_LABEL_ID
         indices = targets[valid] * self.num_classes + predictions[valid]

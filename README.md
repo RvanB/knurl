@@ -49,13 +49,14 @@ hint, allowing a buffer to switch languages without being a valid container
 document. Tune this with `--mixture-fraction` and `--max-regions`.
 
 Preparation removes fenced blocks and conservatively code-like lines from
-Tree-sitter comment captures. The remaining prose and delimiters are fully
-supervised as `comment`; comment losses are not masked. Another 10% of samples
+Tree-sitter comment captures. Original bodies are replaced with diverse,
+deterministic generated prose while delimiters and layout are retained. The
+result is fully supervised as `comment`; comment losses are not masked. Another 10% of samples
 wrap genuine annotated code in comment delimiters while preserving its code
 labels, preventing `/*` or `<!--` from becoming a blanket "everything is a
 comment" cue. Configure this with `--delimiter-wrap-fraction`.
 
-Older annotation files remain readable but do not have this sanitized-comment
+Older annotation files are rejected because they do not have this generated-comment
 policy. Regenerate annotations before training a new model.
 
 ## Train the first BiGRU
@@ -108,19 +109,28 @@ uv run python scripts/train_streaming_model.py \
   --validation data/annotated/python/validation.jsonl data/annotated/rust/validation.jsonl \
   --output runs/streaming-gru --device cuda \
   --chunk-length 256 --lookahead 128 --chunks-per-sample 8 \
-  --batch-size 16 --epochs 0 --early-stopping-patience 3 \
+  --batch-size 16 --epochs 0 --early-stopping-patience 30 \
   --wandb-project neural-highlight --wandb-name streaming-gru
 ```
 
-Its inference contract explicitly accepts `state_in` and returns `state_out`,
-making it suitable for ONNX export and editor-side state checkpoints.
+At the end of training, `best.pt` is automatically exported and numerically
+verified as `best.onnx`. The deployment contract explicitly accepts `state_in`
+and returns `state_out`, making it suitable for editor-side state checkpoints.
+Export an existing compatible checkpoint independently with:
+
+```sh
+uv run python scripts/export_streaming_onnx.py runs/streaming-gru/best.pt
+```
 
 Run arbitrarily long stateful inference with checkpoint-derived chunk settings:
 
 ```sh
-uv run python -m neural_highlight.stream_infer runs/streaming-gru/best.pt \
+uv run python -m neural_highlight.stream_infer runs/streaming-gru/best.onnx \
   long-comment.rs --language rust --device cuda --color
 ```
+
+Streaming inference uses ONNX Runtime. Chunk length, lookahead, model shape,
+and vocabulary schema are embedded in the ONNX metadata and validated on load.
 
 ### Watch training with Weights & Biases
 
@@ -165,26 +175,84 @@ class-aware metrics remain epoch-level.
 ## Multilingual training
 
 The teacher supports Python, JavaScript, TypeScript, HTML, CSS, Rust, C, C++,
-Go, and Java. Prepare all ten monolingual corpora with one command:
+Go, Java, Shell/Bash, SQL, Markdown, Lua, Ruby, and GLSL. Prepare all sixteen
+monolingual corpora with one command:
 
 ```sh
 uv run python scripts/prepare_multilingual.py --source smol --max-files 5000
 ```
+
+GLSL automatically falls back to the public Smol-XS split because it is not in
+the 30-language Smol corpus. Sampling is balanced by language rather than raw
+file count.
 
 Then pass all desired splits to the trainer. The fragment sampler draws across
 the combined record pool and synthesizes abrupt language changes at runtime:
 
 ```sh
 uv run python scripts/train_model.py \
-  --train data/annotated/{python,javascript,typescript,html,css,rust,c,c++,go,java}/train.jsonl \
-  --validation data/annotated/{python,javascript,typescript,html,css,rust,c,c++,go,java}/validation.jsonl \
+  --train data/annotated/{python,javascript,typescript,html,css,rust,c,c++,go,java,shell,sql,markdown,lua,ruby,glsl}/train.jsonl \
+  --validation data/annotated/{python,javascript,typescript,html,css,rust,c,c++,go,java,shell,sql,markdown,lua,ruby,glsl}/validation.jsonl \
   --output runs/multilingual-bigru --device cuda --language-embedding \
   --mixture-fraction 0.25 --max-regions 4 --wandb
 ```
 
 During training, `--prose-code-fraction` (default `0.15`) extracts prose from
-the sanitized, fully supervised comments and mixes it with genuine labeled
+the generated, fully supervised comments and mixes it with genuine labeled
 code. The prose receives the `comment` target while the code retains its syntax
 targets; half of these synthetic examples omit comment delimiters. Thus all
 embedded-code examples have labels known by construction. Validation does not
 use this augmentation. Set the fraction to zero to disable it.
+
+Streaming training can reserve `--long-string-fraction` for multiline literals
+whose entire contents remain `string`. With an unshuffled loader and a quota
+cycle equal to the batch size, augmentation fractions become per-batch replay
+quotas rather than merely epoch-wide probabilities. This keeps long ordinary
+strings and syntax-highlighted embedded-code strings in the same optimizer
+updates.
+
+Streaming evaluation is step-based. `--probe-every-steps` runs the fixed
+behavioral challenge without affecting checkpoint decisions, while
+`--validation-every-steps` runs the authoritative frozen validation crops and
+challenge. Deployment checkpoints use EMA weights. Selection is smoothed over
+`--selection-smoothing-window` checks, enforces minimum ordinary/embedded/long-
+string skill floors, decays the learning rate on a plateau, and honors
+`--minimum-training-steps` before early stopping.
+
+For diagnosing replay specialization, each sample carries its augmentation
+category into the trainer. W&B logs each category's contribution to the shared
+batch loss and periodically measures its gradient norm at the recurrent
+encoder. `--long-string-loss-scale` caps the effective long-string contribution
+without changing its targets or byte coverage.
+
+V17 separates rendered syntax from structural enclosure. Comment and string
+bytes use `plain` as their content target, while a training-only auxiliary head
+predicts `code`, `string`, or `comment`. Embedded code retains its underlying
+syntax labels. The auxiliary loss defaults to `0.1` and is not exported as an
+ONNX output.
+
+V18 adds language-agnostic lexical-run context to the syntax head. Alphabetic,
+underscore, and non-ASCII byte runs are pooled, combined with two neighboring
+runs on either side, projected to 32 features, and broadcast back to their
+bytes. This gives prose/code decisions word-pattern context without changing
+the byte-level public output or requiring a Tree-sitter tokenizer at inference.
+
+For editor integrations, keep one ONNX session alive with the JSON-lines
+server:
+
+```sh
+uv run python -m neural_highlight.stream_server \
+  runs/multilingual-streaming-comments-v18/best.onnx --device cpu
+```
+
+Write one JSON object per stdin line:
+
+```json
+{"id":1,"text":"def hello():\n    return 42","language":"unknown"}
+```
+
+The server flushes one response per request. Spans are compact arrays of
+`[start_byte, end_byte, syntax_id, language_id]`; `id` is echoed unchanged so
+clients can correlate responses. Use `text_base64` instead of `text` for
+arbitrary bytes, and `--describe` to print ID mappings to stderr. Stdout remains
+machine-readable JSON only.
