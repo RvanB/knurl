@@ -14,7 +14,18 @@ def test_prediction_spans_merges_equal_syntax_and_language() -> None:
         checkpoints=(torch.zeros(1),),
     )
     assert prediction_spans(prediction) == [
-        [0, 2, 1, 3], [2, 3, 2, 3], [3, 4, 2, 4],
+        {
+            "start": 0, "end": 2, "syntax": "keyword", "language": "javascript",
+            "syntax_id": 1, "language_id": 3,
+        },
+        {
+            "start": 2, "end": 3, "syntax": "identifier", "language": "javascript",
+            "syntax_id": 2, "language_id": 3,
+        },
+        {
+            "start": 3, "end": 4, "syntax": "identifier", "language": "typescript",
+            "syntax_id": 2, "language_id": 4,
+        },
     ]
 
 
@@ -31,6 +42,9 @@ def test_stream_server_returns_one_json_response_per_request(monkeypatch) -> Non
     serve(object(), io.StringIO('{"id":7,"text":"hello"}\nnot-json\n'), output)
     responses = [json.loads(line) for line in output.getvalue().splitlines()]
     assert responses[0]["id"] == 7
-    assert responses[0]["spans"] == [[0, 5, 1, 0]]
+    assert responses[0]["spans"] == [{
+        "start": 0, "end": 5, "syntax": "keyword", "language": "unknown",
+        "syntax_id": 1, "language_id": 0,
+    }]
     assert responses[1]["id"] is None
     assert "error" in responses[1]

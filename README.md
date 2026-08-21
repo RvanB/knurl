@@ -251,8 +251,9 @@ Write one JSON object per stdin line:
 {"id":1,"text":"def hello():\n    return 42","language":"unknown"}
 ```
 
-The server flushes one response per request. Spans are compact arrays of
-`[start_byte, end_byte, syntax_id, language_id]`; `id` is echoed unchanged so
+The server flushes one response per request. Each span contains `start` and
+`end` UTF-8 byte offsets, named `syntax` and `language` classes, and their
+numeric `syntax_id` and `language_id`. The request `id` is echoed unchanged so
 clients can correlate responses. Use `text_base64` instead of `text` for
-arbitrary bytes, and `--describe` to print ID mappings to stderr. Stdout remains
-machine-readable JSON only.
+arbitrary bytes, and `--describe` to print all ID mappings to stderr. Stdout
+remains machine-readable JSON only.

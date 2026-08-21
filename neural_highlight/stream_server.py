@@ -19,11 +19,11 @@ from neural_highlight.stream_infer import (
 )
 
 
-def prediction_spans(prediction: StreamPrediction) -> list[list[int]]:
-    """Return compact ``[start, end, syntax_id, language_id]`` byte spans."""
+def prediction_spans(prediction: StreamPrediction) -> list[dict[str, int | str]]:
+    """Return editor-ready spans with named syntax and language classes."""
     if not prediction.syntax:
         return []
-    spans: list[list[int]] = []
+    spans: list[dict[str, int | str]] = []
     start = 0
     for index in range(1, len(prediction.syntax) + 1):
         if (
@@ -31,9 +31,16 @@ def prediction_spans(prediction: StreamPrediction) -> list[list[int]]:
             or prediction.syntax[index] != prediction.syntax[start]
             or prediction.regions[index] != prediction.regions[start]
         ):
-            spans.append([
-                start, index, prediction.syntax[start], prediction.regions[start],
-            ])
+            syntax_id = prediction.syntax[start]
+            language_id = prediction.regions[start]
+            spans.append({
+                "start": start,
+                "end": index,
+                "syntax": label_name(syntax_id),
+                "language": LANGUAGE_NAMES[language_id],
+                "syntax_id": syntax_id,
+                "language_id": language_id,
+            })
             start = index
     return spans
 
